@@ -5,12 +5,11 @@ from qwen_tts import Qwen3TTSModel
 # Load model with GPU optimization
 tts = Qwen3TTSModel.from_pretrained(
     "./Qwen3-TTS-12Hz-1.7B-CustomVoice",
-    device="cuda",
-    dtype=torch.float16  # Use half precision for faster inference
-)
+    torch_dtype=torch.float16  # Use half precision for faster inference
+).cuda()
 
-# Optional: Compile model for additional speedup (requires PyTorch 2.0+)
-# tts = torch.compile(tts, mode="reduce-overhead")
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"Using device: {torch.cuda.get_device_name(0)}")
 
 print("Available speakers:", tts.get_supported_speakers())
 
