@@ -1,7 +1,16 @@
 import soundfile as sf
+import torch
 from qwen_tts import Qwen3TTSModel
 
-tts = Qwen3TTSModel.from_pretrained("./Qwen3-TTS-12Hz-1.7B-CustomVoice")
+# Load model with GPU optimization
+tts = Qwen3TTSModel.from_pretrained(
+    "./Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    device="cuda",
+    dtype=torch.float16  # Use half precision for faster inference
+)
+
+# Optional: Compile model for additional speedup (requires PyTorch 2.0+)
+# tts = torch.compile(tts, mode="reduce-overhead")
 
 print("Available speakers:", tts.get_supported_speakers())
 
@@ -23,7 +32,13 @@ It's truly one of nature's most beautiful and reliable rules.
 
 emotions = "[passionate][clear][enthusiastic]"
 
-wavs, sample_rate = tts.generate_custom_voice(text=text, speaker="vivian", language="english", emotion=emotions)
+speakers = tts.get_supported_speakers()
 
-sf.write("output.wav", wavs[0], sample_rate)
-print("Audio saved to output.wav")
+for speaker in speakers:
+    print(f"Generating audio for {speaker}...")
+    wavs, sample_rate = tts.generate_custom_voice(text=text, speaker=speaker, language="english", emotion=emotions)
+    filename = f"output_{speaker}.wav"
+    sf.write(filename, wavs[0], sample_rate)
+    print(f"Audio saved to {filename}")
+
+print(f"\nGenerated {len(speakers)} audio files.")
