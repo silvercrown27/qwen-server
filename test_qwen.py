@@ -1,6 +1,30 @@
 import soundfile as sf
 import torch
+import time
+import threading
 from qwen_tts import Qwen3TTSModel
+import pynvml
+
+# Initialize NVML for GPU monitoring
+pynvml.nvmlInit()
+gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+
+# GPU monitoring state
+monitoring = False
+gpu_stats = []
+
+def monitor_gpu():
+    """Background thread to monitor GPU utilization."""
+    while monitoring:
+        util = pynvml.nvmlDeviceGetUtilizationRates(gpu_handle)
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
+        gpu_stats.append({
+            "gpu_util": util.gpu,
+            "mem_util": util.memory,
+            "mem_used_gb": mem_info.used / 1024**3,
+            "mem_total_gb": mem_info.total / 1024**3
+        })
+        time.sleep(0.5)
 
 # Load model with GPU optimization
 tts = Qwen3TTSModel.from_pretrained(
@@ -34,11 +58,43 @@ emotions = "[passionate][clear][enthusiastic]"
 
 speakers = tts.get_supported_speakers()
 
+total_start = time.time()
+
 for speaker in speakers:
+    print(f"\n{'='*50}")
     print(f"Generating audio for {speaker}...")
+
+    # Reset GPU stats and start monitoring
+    gpu_stats.clear()
+    monitoring = True
+    monitor_thread = threading.Thread(target=monitor_gpu, daemon=True)
+    monitor_thread.start()
+
+    start_time = time.time()
     wavs, sample_rate = tts.generate_custom_voice(text=text, speaker=speaker, language="english", emotion=emotions)
+    elapsed = time.time() - start_time
+
+    # Stop monitoring
+    monitoring = False
+    monitor_thread.join(timeout=1)
+
     filename = f"output_{speaker}.wav"
     sf.write(filename, wavs[0], sample_rate)
-    print(f"Audio saved to {filename}")
 
-print(f"\nGenerated {len(speakers)} audio files.")
+    # Calculate GPU stats
+    if gpu_stats:
+        avg_gpu = sum(s["gpu_util"] for s in gpu_stats) / len(gpu_stats)
+        max_gpu = max(s["gpu_util"] for s in gpu_stats)
+        avg_mem = sum(s["mem_used_gb"] for s in gpu_stats) / len(gpu_stats)
+        print(f"  GPU Utilization: avg={avg_gpu:.1f}%, max={max_gpu:.1f}%")
+        print(f"  VRAM Used: {avg_mem:.2f} GB")
+
+    print(f"  Time: {elapsed:.2f}s")
+    print(f"  Saved to: {filename}")
+
+total_elapsed = time.time() - total_start
+print(f"\n{'='*50}")
+print(f"Generated {len(speakers)} audio files in {total_elapsed:.2f}s")
+print(f"Average time per speaker: {total_elapsed/len(speakers):.2f}s")
+
+pynvml.nvmlShutdown()
