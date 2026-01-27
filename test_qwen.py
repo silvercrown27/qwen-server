@@ -30,9 +30,15 @@ def monitor_gpu():
 # Load model with GPU optimization
 tts = Qwen3TTSModel.from_pretrained(
     "./Qwen3-TTS-12Hz-1.7B-CustomVoice",
-    dtype=torch.float16,
-    device_map="cuda"
+    dtype=torch.bfloat16,  # bfloat16 often faster than float16
+    device_map="cuda",
+    attn_implementation="flash_attention_2",  # Requires flash-attn package
 )
+
+# Enable inference optimizations
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
 
 print(f"CUDA available: {torch.cuda.is_available()}")
 print(f"Using device: {torch.cuda.get_device_name(0)}")
@@ -79,9 +85,11 @@ emotions = "[passionate][clear][enthusiastic]"
 
 speakers = tts.get_supported_speakers()
 
-# Number of parallel workers (adjust based on VRAM - each uses ~5-6GB)
-MAX_WORKERS = 3
+# Number of parallel workers - try 1 first to see baseline, then increase
+# Running multiple in parallel may cause GPU contention
+MAX_WORKERS = 1
 
+@torch.inference_mode()
 def generate_for_speaker(speaker):
     """Generate audio for a single speaker."""
     start_time = time.time()
