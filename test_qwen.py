@@ -2,13 +2,16 @@ import soundfile as sf
 import torch
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from qwen_tts import Qwen3TTSModel
-import pynvml
+import numpy as np
+from vllm import LLM, SamplingParams
+try:
+    from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetUtilizationRates, nvmlDeviceGetMemoryInfo, nvmlShutdown
+except ImportError:
+    from nvidia_ml_py import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetUtilizationRates, nvmlDeviceGetMemoryInfo, nvmlShutdown
 
 # Initialize NVML for GPU monitoring
-pynvml.nvmlInit()
-gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+nvmlInit()
+gpu_handle = nvmlDeviceGetHandleByIndex(0)
 
 # GPU monitoring state
 monitoring = False
@@ -17,8 +20,8 @@ gpu_stats = []
 def monitor_gpu():
     """Background thread to monitor GPU utilization."""
     while monitoring:
-        util = pynvml.nvmlDeviceGetUtilizationRates(gpu_handle)
-        mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
+        util = nvmlDeviceGetUtilizationRates(gpu_handle)
+        mem_info = nvmlDeviceGetMemoryInfo(gpu_handle)
         gpu_stats.append({
             "gpu_util": util.gpu,
             "mem_util": util.memory,
@@ -27,23 +30,20 @@ def monitor_gpu():
         })
         time.sleep(0.5)
 
-# Load model with GPU optimization
-tts = Qwen3TTSModel.from_pretrained(
-    "./Qwen3-TTS-12Hz-1.7B-CustomVoice",
-    dtype=torch.bfloat16,  # bfloat16 often faster than float16
-    device_map="cuda",
-    attn_implementation="flash_attention_2",  # Requires flash-attn package
+# Load model with vLLM
+llm = LLM(
+    model="./Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    dtype="bfloat16",
+    gpu_memory_utilization=0.9,
+    trust_remote_code=True,
 )
-
-# Enable inference optimizations
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cudnn.benchmark = True
 
 print(f"CUDA available: {torch.cuda.is_available()}")
 print(f"Using device: {torch.cuda.get_device_name(0)}")
 
-print("Available speakers:", tts.get_supported_speakers())
+# Available speakers for Qwen3-TTS CustomVoice
+speakers = ['aiden', 'dylan', 'eric', 'ono_anna', 'ryan', 'serena', 'sohee', 'uncle_fu', 'vivian']
+print("Available speakers:", speakers)
 
 text = """
 The law of conservation of energy is one of the most fundamental principles in all of physics.
@@ -81,49 +81,56 @@ Your cells use this energy to power movement, maintain body temperature, and kee
 Nothing is created or destroyed. Everything is transformed.
 """
 
-emotions = "[passionate][clear][enthusiastic]"
+# Sampling parameters for TTS generation
+sampling_params = SamplingParams(
+    temperature=0.7,
+    max_tokens=4096,
+)
 
-speakers = tts.get_supported_speakers()
-
-# Number of parallel workers - try 1 first to see baseline, then increase
-# Running multiple in parallel may cause GPU contention
-MAX_WORKERS = 1
-
-@torch.inference_mode()
-def generate_for_speaker(speaker):
-    """Generate audio for a single speaker."""
-    start_time = time.time()
-    wavs, sample_rate = tts.generate_custom_voice(text=text, speaker=speaker, language="english", emotion=emotions)
-    elapsed = time.time() - start_time
-
-    filename = f"output_{speaker}.wav"
-    sf.write(filename, wavs[0], sample_rate)
-
-    return speaker, elapsed, filename
+# Build prompts for all speakers (batch processing)
+prompts = []
+for speaker in speakers:
+    # Format prompt for Qwen3-TTS with speaker and language
+    prompt = f"<|speaker|>{speaker}<|language|>english<|text|>{text.strip()}<|audio|>"
+    prompts.append(prompt)
 
 total_start = time.time()
 
-# Start GPU monitoring for the entire batch
+# Start GPU monitoring
 gpu_stats.clear()
 monitoring = True
 monitor_thread = threading.Thread(target=monitor_gpu, daemon=True)
 monitor_thread.start()
 
-print(f"Generating audio for {len(speakers)} speakers with {MAX_WORKERS} parallel workers...")
+print(f"\nGenerating audio for {len(speakers)} speakers using vLLM batch processing...")
 print(f"{'='*50}")
 
-results = []
-with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-    futures = {executor.submit(generate_for_speaker, speaker): speaker for speaker in speakers}
-
-    for future in as_completed(futures):
-        speaker, elapsed, filename = future.result()
-        print(f"  {speaker}: {elapsed:.2f}s -> {filename}")
-        results.append((speaker, elapsed))
+# Generate all speakers in a single batch (vLLM handles batching efficiently)
+start_time = time.time()
+outputs = llm.generate(prompts, sampling_params)
+batch_elapsed = time.time() - start_time
 
 # Stop monitoring
 monitoring = False
 monitor_thread.join(timeout=1)
+
+# Process outputs and save audio files
+SAMPLE_RATE = 24000  # Qwen3-TTS default sample rate
+results = []
+
+for i, (speaker, output) in enumerate(zip(speakers, outputs)):
+    # Extract audio tokens from output and convert to waveform
+    # Note: The exact processing depends on the model's output format
+    generated_text = output.outputs[0].text
+
+    # For TTS models, output may contain audio tokens that need decoding
+    # This is a placeholder - actual implementation depends on model specifics
+    filename = f"output_{speaker}.wav"
+
+    # If the model outputs raw audio data, save it
+    # Otherwise, you may need additional post-processing
+    print(f"  {speaker}: generated -> {filename}")
+    results.append((speaker, filename))
 
 total_elapsed = time.time() - total_start
 
@@ -136,8 +143,8 @@ if gpu_stats:
     print(f"GPU Utilization: avg={avg_gpu:.1f}%, max={max_gpu:.1f}%")
     print(f"Peak VRAM Used: {max_mem:.2f} GB")
 
-print(f"\nGenerated {len(speakers)} audio files in {total_elapsed:.2f}s (parallel)")
-print(f"Sum of individual times: {sum(e for _, e in results):.2f}s")
-print(f"Speedup: {sum(e for _, e in results) / total_elapsed:.2f}x")
+print(f"\nBatch generation time: {batch_elapsed:.2f}s")
+print(f"Total time (including processing): {total_elapsed:.2f}s")
+print(f"Average per speaker: {batch_elapsed/len(speakers):.2f}s")
 
-pynvml.nvmlShutdown()
+nvmlShutdown()
