@@ -62,9 +62,9 @@ wavs, sr = model.generate_custom_voice(
     language=["english"] * len(texts),
     speaker=[SPEAKER] * len(texts),
     instruct=[
-        "Speak with a sense of wonder and discovery, building intrigue — slow-paced with a compelling, cinematic pitch",
-        "Authoritative and serious, like a documentary narrator presenting a critical problem — measured pace with dramatic gravitas",
-        "Confident and forward-looking, rising energy toward the conclusion — warm storyteller tone with a sense of resolution",
+        "Speak with bubbly enthusiasm and playful excitement, like you just discovered something amazing — fast-paced with rising intonation and a bright, energetic pitch",
+        "Lively and animated, with a fun sense of urgency — playful delivery that makes technical concepts feel like an adventure",
+        "Cheerful and triumphant, bursting with energy toward the conclusion — upbeat storyteller tone with a big smile in the voice",
     ],
 )
 
