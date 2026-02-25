@@ -12,13 +12,22 @@ MODEL_LOCAL = os.path.abspath("./Qwen3-TTS-12Hz-1.7B-CustomVoice")
 MODEL_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 model_path = MODEL_LOCAL if os.path.isdir(MODEL_LOCAL) else MODEL_HF_ID
 
+# Enable TF32 on Ampere+ GPUs (SM 8.x) — uses tensor cores for matmul, ~2x throughput
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 print(f"Loading model from: {model_path}")
 model = Qwen3TTSModel.from_pretrained(
     model_path,
     device_map="cuda:0",
     dtype=torch.bfloat16,
-    attn_implementation="sdpa",
+    attn_implementation="flash_attention_2",
 )
+
+# Compile the model — first run pays the compile cost (~30s), all subsequent runs are faster
+print("Compiling model with torch.compile...")
+model = torch.compile(model, mode="reduce-overhead")
+print("Model ready.")
 
 # --- Three text segments ---
 
