@@ -33,7 +33,7 @@ def monitor_gpu():
 
 # Load model with vLLM
 llm = LLM(
-    model=os.path.abspath("./Qwen3-TTS-12Hz-1.7B-CustomVoice"),
+    model=os.path.abspath("./Qwen3-TTS-12Hz-1.7B-CustomVoice") if os.path.isdir(os.path.abspath("./Qwen3-TTS-12Hz-1.7B-CustomVoice")) else "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
     dtype="bfloat16",
     gpu_memory_utilization=0.9,
     trust_remote_code=True,
