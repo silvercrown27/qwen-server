@@ -1,11 +1,10 @@
 import os
 import time
+import torch
 import numpy as np
 import soundfile as sf
-from vllm import LLM, SamplingParams
-from qwen_tts import QwenTTSProcessor
+from qwen_tts import Qwen3TTSModel
 
-SAMPLE_RATE = 24000
 SPEAKER = "sohee"
 
 # Model path: use local directory if downloaded, otherwise auto-download from Hub
@@ -13,20 +12,13 @@ MODEL_LOCAL = os.path.abspath("./Qwen3-TTS-12Hz-1.7B-CustomVoice")
 MODEL_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 model_path = MODEL_LOCAL if os.path.isdir(MODEL_LOCAL) else MODEL_HF_ID
 
-TOKENIZER_LOCAL = os.path.abspath("./Qwen3-TTS-Tokenizer-12Hz")
-TOKENIZER_HF_ID = "Qwen/Qwen3-TTS-Tokenizer-12Hz"
-tokenizer_path = TOKENIZER_LOCAL if os.path.isdir(TOKENIZER_LOCAL) else TOKENIZER_HF_ID
-
 print(f"Loading model from: {model_path}")
-llm = LLM(
-    model=model_path,
-    dtype="bfloat16",
-    gpu_memory_utilization=0.9,
-    trust_remote_code=True,
+model = Qwen3TTSModel.from_pretrained(
+    model_path,
+    device_map="cuda:0",
+    dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
 )
-
-print(f"Loading tokenizer/processor from: {tokenizer_path}")
-processor = QwenTTSProcessor.from_pretrained(tokenizer_path)
 
 # --- Three text segments ---
 
@@ -45,40 +37,34 @@ texts = [
     "dramatically reducing the pilot overhead compared to traditional exhaustive beam scanning methods.",
 ]
 
-# Build prompts — <|emotion|>happy drives the upbeat/enticing delivery
-prompts = [
-    f"<|speaker|>{SPEAKER}<|language|>english<|emotion|>happy<|text|>{text}<|audio|>"
-    for text in texts
-]
+print(f"\nGenerating {len(texts)} segments for speaker '{SPEAKER}' (upbeat/enticing)...")
+start = time.time()
 
-sampling_params = SamplingParams(
-    temperature=0.7,
-    max_tokens=4096,
+# generate_custom_voice handles generation + decoding in one call
+# instruct sets the emotional style
+wavs, sr = model.generate_custom_voice(
+    text=texts,
+    language=["english"] * len(texts),
+    speaker=[SPEAKER] * len(texts),
+    instruct="Speak with an upbeat and enticing tone",
 )
 
-print(f"\nGenerating {len(texts)} segments for speaker '{SPEAKER}' (upbeat/happy emotion)...")
-start = time.time()
-outputs = llm.generate(prompts, sampling_params)
 elapsed = time.time() - start
-print(f"Generation complete in {elapsed:.2f}s")
+print(f"Generation complete in {elapsed:.2f}s  (sample_rate={sr})")
 
-# --- Decode audio tokens and save individual segments ---
+# --- Save individual segments ---
 
 segments = []
-for i, output in enumerate(outputs, start=1):
-    token_ids = output.outputs[0].token_ids
-    waveform = processor.decode(token_ids)
-    waveform = waveform.astype(np.float32)
-
+for i, wav in enumerate(wavs, start=1):
+    wav = wav.astype(np.float32)
     seg_path = f"segment_{i}.wav"
-    sf.write(seg_path, waveform, SAMPLE_RATE)
-    duration = len(waveform) / SAMPLE_RATE
-    print(f"  segment_{i}.wav — {duration:.1f}s  ({len(token_ids)} tokens)")
-    segments.append(waveform)
+    sf.write(seg_path, wav, sr)
+    print(f"  segment_{i}.wav — {len(wav) / sr:.1f}s")
+    segments.append(wav)
 
 # --- Combine with 1-second silence between segments ---
 
-silence = np.zeros(SAMPLE_RATE, dtype=np.float32)  # 1 second at 24 kHz
+silence = np.zeros(sr, dtype=np.float32)
 
 combined = np.concatenate([
     segments[0], silence,
@@ -87,9 +73,9 @@ combined = np.concatenate([
 ])
 
 out_path = "combined_output.wav"
-sf.write(out_path, combined, SAMPLE_RATE)
+sf.write(out_path, combined, sr)
 
-total_duration = len(combined) / SAMPLE_RATE
+total_duration = len(combined) / sr
 file_size_kb = os.path.getsize(out_path) / 1024
 
 print(f"\nSaved: {out_path}")
