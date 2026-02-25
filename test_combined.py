@@ -45,7 +45,7 @@ wavs, sr = model.generate_custom_voice(
     text=texts,
     language=["english"] * len(texts),
     speaker=[SPEAKER] * len(texts),
-    instruct="Speak with an enthusiastic and engaging tone, like a passionate professor explaining a breakthrough",
+    instruct="Speak with a sense of wonder and discovery, emphasizing key technical terms with subtle intensity",
 )
 
 elapsed = time.time() - start
