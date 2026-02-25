@@ -59,7 +59,6 @@ fastapi==0.133.0
 fastjsonschema==2.21.2
 ffmpy==1.0.0
 filelock==3.24.3
-flash_attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl#sha256=ca5a5614530bad3bcaf936917d53a6d60c9057d1218030efe3ca588cb4f4ebb6
 flatbuffers==25.12.19
 fonttools==4.61.1
 fqdn==1.5.1
