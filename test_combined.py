@@ -30,9 +30,9 @@ model = Qwen3TTSModel.from_pretrained(
     attn_implementation=attn_impl,
 )
 
-# Compile the model — first run pays the compile cost (~30s), all subsequent runs are faster
+# Compile the inner nn.Module — Qwen3TTSModel is a wrapper, not nn.Module itself
 print("Compiling model with torch.compile...")
-model = torch.compile(model, mode="reduce-overhead")
+model.model = torch.compile(model.model, mode="reduce-overhead")
 print("Model ready.")
 
 # --- Three text segments ---
