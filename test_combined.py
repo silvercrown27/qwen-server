@@ -16,12 +16,18 @@ model_path = MODEL_LOCAL if os.path.isdir(MODEL_LOCAL) else MODEL_HF_ID
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-print(f"Loading model from: {model_path}")
+try:
+    import flash_attn  # noqa: F401
+    attn_impl = "flash_attention_2"
+except Exception:
+    attn_impl = "sdpa"
+
+print(f"Loading model from: {model_path}  (attn={attn_impl})")
 model = Qwen3TTSModel.from_pretrained(
     model_path,
     device_map="cuda:0",
     dtype=torch.bfloat16,
-    attn_implementation="flash_attention_2",
+    attn_implementation=attn_impl,
 )
 
 # Compile the model — first run pays the compile cost (~30s), all subsequent runs are faster
