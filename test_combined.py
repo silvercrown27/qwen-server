@@ -17,6 +17,7 @@ model = Qwen3TTSModel.from_pretrained(
     model_path,
     device_map="cuda:0",
     dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
 )
 
 # --- Three text segments ---
