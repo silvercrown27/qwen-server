@@ -61,12 +61,7 @@ wavs, sr = model.generate_custom_voice(
     text=texts,
     language=["english"] * len(texts),
     speaker=[SPEAKER] * len(texts),
-    instruct=[
-        "Speak at a consistent, moderate volume and even pace throughout.",
-        "Speak with bubbly enthusiasm and playful excitement, like you just discovered something amazing — fast-paced with rising intonation and a bright, energetic pitch",
-        "Lively and animated, with a fun sense of urgency — playful delivery that makes technical concepts feel like an adventure",
-        "Cheerful and triumphant, bursting with energy toward the conclusion — upbeat storyteller tone with a big smile in the voice",
-    ],
+    instruct="Speak at a consistent, moderate volume and even pace throughout. Lively and animated, with a fun sense of urgency — playful delivery that makes technical concepts feel like an adventure",
 )
 
 elapsed = time.time() - start
