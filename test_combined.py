@@ -10,7 +10,6 @@ MODEL_LOCAL = os.path.abspath("./Qwen3-TTS-12Hz-1.7B-CustomVoice")
 MODEL_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 model_path = MODEL_LOCAL if os.path.isdir(MODEL_LOCAL) else MODEL_HF_ID
 
-# Enable TF32 on Ampere+ GPUs (SM 8.x) — uses tensor cores for matmul, ~2x throughput
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
@@ -28,140 +27,206 @@ model = Qwen3TTSModel.from_pretrained(
     attn_implementation=attn_impl,
 )
 
-# Compile the inner nn.Module — Qwen3TTSModel is a wrapper, not nn.Module itself
 print("Compiling model with torch.compile...")
 model.model = torch.compile(model.model, mode="reduce-overhead")
 print("Model ready.")
 
-# ---------------------------------------------------------------------------
-# LESSON 1 — Japanese terms (English narration with Japanese words embedded)
-# Speaker: ryan (clear English voice for language instruction)
-# ---------------------------------------------------------------------------
-
-japanese_segments = [
-    # Greetings
-    "Welcome to your Japanese lesson. Let's start with greetings. "
-    "The most common way to say hello is こんにちは — konnichiwa. "
-    "In the morning, you say おはようございます — ohayou gozaimasu, meaning good morning. "
-    "And in the evening, こんばんは — konbanwa — means good evening.",
-
-    # Thank you / sorry
-    "Next, two of the most essential phrases. "
-    "To say thank you, use ありがとうございます — arigatou gozaimasu. "
-    "For a more casual thank you between friends, simply ありがとう — arigatou. "
-    "To apologize or say excuse me, you say すみません — sumimasen. "
-    "Remember, すみません is also used to get someone's attention, like saying 'excuse me' to a waiter.",
-
-    # Numbers
-    "Let's learn the numbers one through five. "
-    "One is 一 — ichi. Two is 二 — ni. Three is 三 — san. "
-    "Four is 四 — shi, or sometimes よん — yon. And five is 五 — go. "
-    "You might recognize these from martial arts — いち、に、さん、し、ご — "
-    "ichi, ni, san, shi, go. Great work!",
-]
-
-japanese_languages = ["english", "english", "english"]
 
 # ---------------------------------------------------------------------------
-# LESSON 2 — Chinese (Mandarin) terms (English narration with Chinese embedded)
-# Speaker: vivian
+# Audio helpers
 # ---------------------------------------------------------------------------
 
-chinese_segments = [
-    # Greetings
-    "Now let's explore some Mandarin Chinese. "
-    "The universal greeting is 你好 — nǐ hǎo, literally meaning 'you good'. "
-    "For a more formal hello, say 您好 — nín hǎo, where 您 is the respectful form of 'you'. "
-    "To ask how someone is doing, say 你好吗 — nǐ hǎo ma? The word 吗 — ma — turns any statement into a yes-or-no question.",
+def rms_normalize(wav: np.ndarray, target_rms: float = 0.08) -> np.ndarray:
+    """Scale wav so its RMS matches target_rms.  Prevents chunk-to-chunk loudness jumps."""
+    rms = np.sqrt(np.mean(wav ** 2))
+    if rms < 1e-9:
+        return wav
+    return wav * (target_rms / rms)
 
-    # Food
-    "Food is a great way to connect with a language. "
-    "The word for rice is 米饭 — mǐ fàn. Noodles are 面条 — miàn tiáo. "
-    "To say 'I want to eat', say 我想吃 — wǒ xiǎng chī. "
-    "So '我想吃面条' — wǒ xiǎng chī miàn tiáo — means 'I want to eat noodles'. "
-    "And if something is delicious, say 好吃 — hǎo chī — literally 'good to eat'.",
 
-    # Tones reminder
-    "Mandarin has four tones, and they completely change meaning. "
-    "Listen to the word 'ma' with different tones: "
-    "妈 — mā — first tone, means mother. "
-    "麻 — má — second tone, means hemp or numb. "
-    "马 — mǎ — third tone, means horse. "
-    "骂 — mà — fourth tone, means to scold. "
-    "So 妈妈骂马吗 — māma mà mǎ ma — means 'does mother scold the horse?' — a classic tongue twister for tone practice!",
-]
+def crossfade_join(chunks: list[np.ndarray], sr: int,
+                   gap_ms: int = 60, fade_ms: int = 10) -> np.ndarray:
+    """
+    Concatenate audio chunks with a short silence gap and linear cross-fade at each
+    boundary to avoid clicks.  All chunks are RMS-normalised before joining.
 
-chinese_languages = ["english", "english", "english"]
+    gap_ms   — silence inserted between every chunk (milliseconds)
+    fade_ms  — fade-out / fade-in applied at the boundary (milliseconds)
+    """
+    target_rms = float(np.mean([np.sqrt(np.mean(c ** 2)) for c in chunks if len(c) > 0]))
+    target_rms = max(target_rms, 0.02)
+
+    normalised = [rms_normalize(c.astype(np.float32), target_rms) for c in chunks]
+
+    gap    = np.zeros(int(sr * gap_ms  / 1000), dtype=np.float32)
+    fade_n = int(sr * fade_ms / 1000)
+
+    fade_out = np.linspace(1.0, 0.0, fade_n, dtype=np.float32)
+    fade_in  = np.linspace(0.0, 1.0, fade_n, dtype=np.float32)
+
+    parts = []
+    for i, chunk in enumerate(normalised):
+        c = chunk.copy()
+        # Fade the tail of this chunk
+        if len(c) >= fade_n:
+            c[-fade_n:] *= fade_out
+        # Fade the head of this chunk
+        if len(c) >= fade_n:
+            c[:fade_n] *= fade_in
+        parts.append(c)
+        if i < len(normalised) - 1:
+            parts.append(gap)
+
+    return np.concatenate(parts)
+
+
+def generate_lesson(chunks: list[tuple[str, str]], speaker: str,
+                    instruct: str) -> tuple[np.ndarray, int]:
+    """
+    Generate a language lesson by splitting at language boundaries.
+
+    chunks  : list of (text, language) tuples
+    speaker : single speaker name applied to every chunk
+    instruct: ONE shared instruction string — critical for voice consistency.
+              Do NOT vary this per-language; consistent instruction = consistent prosody.
+
+    Returns (audio_array, sample_rate).
+    """
+    texts = [t for t, _ in chunks]
+    langs = [l for _, l in chunks]
+
+    # Single instruct string applied to all segments — keeps voice consistent
+    wavs, sr = model.generate_custom_voice(
+        text=texts,
+        language=langs,
+        speaker=[speaker] * len(texts),
+        instruct=instruct,        # str, not list — uniform voice profile
+    )
+
+    audio = crossfade_join([w for w in wavs], sr, gap_ms=70, fade_ms=12)
+    return audio, sr
+
 
 # ---------------------------------------------------------------------------
-# Generate Japanese lesson
+# LESSON 1 — Japanese
+# Single instruct: teacher voice that adapts pronunciation per language tag
 # ---------------------------------------------------------------------------
 
-print(f"\n--- Generating Japanese lesson ({len(japanese_segments)} segments, speaker: ryan) ---")
-start = time.time()
-
-wavs_jp, sr = model.generate_custom_voice(
-    text=japanese_segments,
-    language=japanese_languages,
-    speaker=["ryan"] * len(japanese_segments),
-    instruct=(
-        "Warm, encouraging teacher voice. Speak English naturally at a steady pace. "
-        "When saying Japanese words, slow down slightly and pronounce them with care, "
-        "then return to a friendly, conversational tone for the English explanation."
-    ),
+JP_INSTRUCT = (
+    "Warm, encouraging language teacher with a clear and steady voice. "
+    "Speak at a measured pace throughout — both English and Japanese words should "
+    "feel like they come from the same calm, friendly speaker."
 )
 
-elapsed = time.time() - start
-print(f"Japanese lesson generated in {elapsed:.2f}s  (sample_rate={sr})")
+jp_chunks = [
+    # Greetings
+    ("Welcome to your Japanese lesson. Let's start with greetings. "
+     "The most common way to say hello is",                              "english"),
+    ("こんにちは",                                                        "japanese"),
+    ("In the morning you say",                                            "english"),
+    ("おはようございます",                                                "japanese"),
+    ("meaning good morning. And in the evening,",                         "english"),
+    ("こんばんは",                                                        "japanese"),
+    ("means good evening.",                                               "english"),
 
-jp_segments = []
-for i, wav in enumerate(wavs_jp, start=1):
-    wav = wav.astype(np.float32)
-    seg_path = f"jp_segment_{i}.wav"
-    sf.write(seg_path, wav, sr)
-    print(f"  jp_segment_{i}.wav — {len(wav) / sr:.1f}s")
-    jp_segments.append(wav)
+    # Thank you / excuse me
+    ("Now let's learn some essential phrases. To say thank you use",      "english"),
+    ("ありがとうございます",                                              "japanese"),
+    ("For a casual thank you between friends, simply",                    "english"),
+    ("ありがとう",                                                        "japanese"),
+    ("To apologize or get someone's attention say",                       "english"),
+    ("すみません",                                                        "japanese"),
+    ("This works like excuse me or I'm sorry depending on context.",      "english"),
+
+    # Numbers 1–5
+    ("Now let's count from one to five. One is",                          "english"),
+    ("いち",                                                              "japanese"),
+    ("Two is",                                                            "english"),
+    ("に",                                                                "japanese"),
+    ("Three is",                                                          "english"),
+    ("さん",                                                              "japanese"),
+    ("Four is",                                                           "english"),
+    ("し、またはよん",                                                    "japanese"),
+    ("And five is",                                                       "english"),
+    ("ご",                                                                "japanese"),
+    ("You might recognise those from martial arts — great work!",         "english"),
+]
 
 # ---------------------------------------------------------------------------
-# Generate Chinese lesson
+# LESSON 2 — Mandarin Chinese
 # ---------------------------------------------------------------------------
 
-print(f"\n--- Generating Chinese lesson ({len(chinese_segments)} segments, speaker: vivian) ---")
-start = time.time()
-
-wavs_zh, sr = model.generate_custom_voice(
-    text=chinese_segments,
-    language=chinese_languages,
-    speaker=["vivian"] * len(chinese_segments),
-    instruct=(
-        "Warm, enthusiastic language teacher. Speak English clearly and conversationally. "
-        "When pronouncing Chinese words, enunciate each tone with care and a brief natural pause "
-        "before continuing the English explanation — as if helping a student absorb each new word."
-    ),
+ZH_INSTRUCT = (
+    "Warm, enthusiastic language teacher with a clear and steady voice. "
+    "Speak at a measured pace throughout — both English and Chinese words should "
+    "feel like they come from the same calm, friendly speaker."
 )
 
-elapsed = time.time() - start
-print(f"Chinese lesson generated in {elapsed:.2f}s  (sample_rate={sr})")
+zh_chunks = [
+    # Greetings
+    ("Now let's explore some Mandarin Chinese. "
+     "The most common greeting is",                                        "english"),
+    ("你好",                                                               "chinese"),
+    ("which literally means you good. For a more formal hello say",        "english"),
+    ("您好",                                                               "chinese"),
+    ("where 您 is the respectful form of you. "
+     "To ask how someone is doing say",                                    "english"),
+    ("你好吗",                                                             "chinese"),
+    ("The word",                                                           "english"),
+    ("吗",                                                                 "chinese"),
+    ("turns any statement into a yes or no question.",                     "english"),
 
-zh_segments = []
-for i, wav in enumerate(wavs_zh, start=1):
-    wav = wav.astype(np.float32)
-    seg_path = f"zh_segment_{i}.wav"
-    sf.write(seg_path, wav, sr)
-    print(f"  zh_segment_{i}.wav — {len(wav) / sr:.1f}s")
-    zh_segments.append(wav)
+    # Food vocab
+    ("Food is a wonderful way to connect with a language. "
+     "The word for rice is",                                               "english"),
+    ("米饭",                                                               "chinese"),
+    ("Noodles are",                                                        "english"),
+    ("面条",                                                               "chinese"),
+    ("To say I want to eat say",                                           "english"),
+    ("我想吃",                                                             "chinese"),
+    ("So I want to eat noodles is",                                        "english"),
+    ("我想吃面条",                                                         "chinese"),
+    ("And if something is delicious say",                                  "english"),
+    ("好吃",                                                               "chinese"),
+    ("which literally means good to eat.",                                 "english"),
+
+    # The four tones
+    ("Mandarin has four tones that completely change meaning. "
+     "Listen to the syllable ma in each tone. First tone, meaning mother:", "english"),
+    ("妈",                                                                 "chinese"),
+    ("Second tone, meaning hemp or numb:",                                  "english"),
+    ("麻",                                                                 "chinese"),
+    ("Third tone, meaning horse:",                                          "english"),
+    ("马",                                                                 "chinese"),
+    ("Fourth tone, meaning to scold:",                                      "english"),
+    ("骂",                                                                 "chinese"),
+    ("Now here is a classic tongue twister using all four:",                "english"),
+    ("妈妈骂马吗",                                                         "chinese"),
+    ("Which means: does mother scold the horse? Fantastic listening!",      "english"),
+]
 
 # ---------------------------------------------------------------------------
-# Combine: Japanese lesson → pause → Chinese lesson
+# Generate both lessons
 # ---------------------------------------------------------------------------
 
-silence_short = np.zeros(int(sr * 0.8), dtype=np.float32)   # 0.8s between segments
-silence_long  = np.zeros(int(sr * 2.0), dtype=np.float32)   # 2.0s between lessons
+print("\n--- Generating Japanese lesson ---")
+t0 = time.time()
+jp_audio, sr = generate_lesson(jp_chunks, speaker="ryan", instruct=JP_INSTRUCT)
+print(f"Japanese lesson: {len(jp_audio)/sr:.1f}s  ({time.time()-t0:.1f}s gen time)")
+sf.write("japanese_lesson.wav", jp_audio, sr)
 
-jp_combined = np.concatenate([seg for pair in zip(jp_segments, [silence_short] * len(jp_segments)) for seg in pair])
-zh_combined = np.concatenate([seg for pair in zip(zh_segments, [silence_short] * len(zh_segments)) for seg in pair])
+print("\n--- Generating Chinese lesson ---")
+t0 = time.time()
+zh_audio, sr = generate_lesson(zh_chunks, speaker="vivian", instruct=ZH_INSTRUCT)
+print(f"Chinese lesson:  {len(zh_audio)/sr:.1f}s  ({time.time()-t0:.1f}s gen time)")
+sf.write("chinese_lesson.wav", zh_audio, sr)
 
-combined = np.concatenate([jp_combined, silence_long, zh_combined])
+# ---------------------------------------------------------------------------
+# Combine: Japanese → 3 s pause → Chinese
+# ---------------------------------------------------------------------------
+
+pause = np.zeros(int(sr * 3.0), dtype=np.float32)
+combined = np.concatenate([jp_audio, pause, zh_audio])
 
 out_path = "combined_output.wav"
 sf.write(out_path, combined, sr)
@@ -169,9 +234,7 @@ sf.write(out_path, combined, sr)
 total_duration = len(combined) / sr
 file_size_kb = os.path.getsize(out_path) / 1024
 
-print(f"\nSaved: {out_path}")
-print(f"  Total duration : {total_duration:.1f}s")
-print(f"  File size      : {file_size_kb:.1f} KB")
-print(f"\nIndividual files:")
-print(f"  jp_segment_1.wav — jp_segment_{len(jp_segments)}.wav  (Japanese lesson)")
-print(f"  zh_segment_1.wav — zh_segment_{len(zh_segments)}.wav  (Chinese lesson)")
+print(f"\nSaved:")
+print(f"  japanese_lesson.wav  — {len(jp_audio)/sr:.1f}s")
+print(f"  chinese_lesson.wav   — {len(zh_audio)/sr:.1f}s")
+print(f"  combined_output.wav  — {total_duration:.1f}s  ({file_size_kb:.1f} KB)")
