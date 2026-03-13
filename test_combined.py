@@ -190,40 +190,32 @@ def generate_lesson(chunks: list[tuple[str, str]]) -> tuple[np.ndarray, int]:
 
 # ---------------------------------------------------------------------------
 # LESSON 1 — Japanese
+# Each chunk is a full paragraph — the model handles inline Japanese characters
+# naturally. Fewer chunks = fewer generation boundaries = much less voice drift.
 # ---------------------------------------------------------------------------
 
 jp_chunks = [
-    # Greetings
+    # Paragraph 1: Greetings
     ("Welcome to your Japanese lesson. Let's start with greetings. "
-     "The most common way to say hello is",                              "english"),
-    ("こんにちは",                                                        "japanese"),
-    ("In the morning you say",                                            "english"),
-    ("おはようございます",                                                "japanese"),
-    ("meaning good morning. And in the evening,",                         "english"),
-    ("こんばんは",                                                        "japanese"),
-    ("means good evening.",                                               "english"),
+     "The most common way to say hello is こんにちは. "
+     "In the morning you say おはようございます, meaning good morning. "
+     "And in the evening, こんばんは means good evening.",
+     "english"),
 
-    # Thank you / excuse me
-    ("Now let's learn some essential phrases. To say thank you use",      "english"),
-    ("ありがとうございます",                                              "japanese"),
-    ("For a casual thank you between friends, simply",                    "english"),
-    ("ありがとう",                                                        "japanese"),
-    ("To apologize or get someone's attention say",                       "english"),
-    ("すみません",                                                        "japanese"),
-    ("This works like excuse me or I'm sorry depending on context.",      "english"),
+    # Paragraph 2: Thank you / excuse me
+    ("Now let's learn some essential phrases. "
+     "To say thank you, use ありがとうございます. "
+     "For a casual thank you between friends, simply say ありがとう. "
+     "To apologize or get someone's attention, say すみません. "
+     "This works like excuse me or I'm sorry, depending on context.",
+     "english"),
 
-    # Numbers 1–5
-    ("Now let's count from one to five. One is",                          "english"),
-    ("いち",                                                              "japanese"),
-    ("Two is",                                                            "english"),
-    ("に",                                                                "japanese"),
-    ("Three is",                                                          "english"),
-    ("さん",                                                              "japanese"),
-    ("Four is",                                                           "english"),
-    ("し、またはよん",                                                    "japanese"),
-    ("And five is",                                                       "english"),
-    ("ご",                                                                "japanese"),
-    ("You might recognise those from martial arts — great work!",         "english"),
+    # Paragraph 3: Numbers 1–5
+    ("Now let's count from one to five. "
+     "One is いち. Two is に. Three is さん. "
+     "Four is し, or sometimes よん. And five is ご. "
+     "You might recognise those from martial arts — great work!",
+     "english"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -231,46 +223,32 @@ jp_chunks = [
 # ---------------------------------------------------------------------------
 
 zh_chunks = [
-    # Greetings
+    # Paragraph 1: Greetings
     ("Now let's explore some Mandarin Chinese. "
-     "The most common greeting is",                                        "english"),
-    ("你好",                                                               "chinese"),
-    ("which literally means you good. For a more formal hello say",        "english"),
-    ("您好",                                                               "chinese"),
-    ("where 您 is the respectful form of you. "
-     "To ask how someone is doing say",                                    "english"),
-    ("你好吗",                                                             "chinese"),
-    ("The word",                                                           "english"),
-    ("吗",                                                                 "chinese"),
-    ("turns any statement into a yes or no question.",                     "english"),
+     "The most common greeting is 你好, which literally means you good. "
+     "For a more formal hello, say 您好, where 您 is the respectful form of you. "
+     "To ask how someone is doing, say 你好吗. "
+     "The word 吗 turns any statement into a yes or no question.",
+     "english"),
 
-    # Food vocab
+    # Paragraph 2: Food vocabulary
     ("Food is a wonderful way to connect with a language. "
-     "The word for rice is",                                               "english"),
-    ("米饭",                                                               "chinese"),
-    ("Noodles are",                                                        "english"),
-    ("面条",                                                               "chinese"),
-    ("To say I want to eat say",                                           "english"),
-    ("我想吃",                                                             "chinese"),
-    ("So I want to eat noodles is",                                        "english"),
-    ("我想吃面条",                                                         "chinese"),
-    ("And if something is delicious say",                                  "english"),
-    ("好吃",                                                               "chinese"),
-    ("which literally means good to eat.",                                 "english"),
+     "The word for rice is 米饭. Noodles are 面条. "
+     "To say I want to eat, say 我想吃. "
+     "So I want to eat noodles is 我想吃面条. "
+     "And if something is delicious, say 好吃, which literally means good to eat.",
+     "english"),
 
-    # The four tones
+    # Paragraph 3: The four tones
     ("Mandarin has four tones that completely change meaning. "
-     "Listen to the syllable ma in each tone. First tone, meaning mother:", "english"),
-    ("妈",                                                                 "chinese"),
-    ("Second tone, meaning hemp or numb:",                                  "english"),
-    ("麻",                                                                 "chinese"),
-    ("Third tone, meaning horse:",                                          "english"),
-    ("马",                                                                 "chinese"),
-    ("Fourth tone, meaning to scold:",                                      "english"),
-    ("骂",                                                                 "chinese"),
-    ("Now here is a classic tongue twister using all four:",                "english"),
-    ("妈妈骂马吗",                                                         "chinese"),
-    ("Which means: does mother scold the horse? Fantastic listening!",      "english"),
+     "Listen to the syllable ma in each tone. "
+     "First tone — 妈 — means mother. "
+     "Second tone — 麻 — means hemp or numb. "
+     "Third tone — 马 — means horse. "
+     "Fourth tone — 骂 — means to scold. "
+     "Now here is a classic tongue twister using all four: 妈妈骂马吗. "
+     "Which means: does mother scold the horse? Fantastic listening!",
+     "english"),
 ]
 
 # ---------------------------------------------------------------------------
