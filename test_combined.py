@@ -180,9 +180,8 @@ def generate_lesson(chunks: list[tuple[str, str]]) -> tuple[np.ndarray, int]:
     wavs, sr = model.generate_voice_clone(
         text=texts,
         language=langs,
-        ref_audio=anchor_wav,
+        ref_audio=(anchor_wav, anchor_sr),
         ref_text=ANCHOR_TEXT,
-        sr=anchor_sr,
     )
     all_wavs = [w.astype(np.float32) for w in wavs]
     all_wavs = pitch_normalize(all_wavs, sr)
