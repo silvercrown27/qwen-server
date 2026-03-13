@@ -1,14 +1,36 @@
 import os
+os.environ["ORT_LOGGING_LEVEL"] = "3"  # Suppress ONNX Runtime DRM/OpenCL warnings (unrelated to CUDA)
+
+import inspect
 import time
 import torch
 import numpy as np
+import librosa
 import soundfile as sf
+from huggingface_hub import snapshot_download
 from qwen_tts import Qwen3TTSModel
 
-# Model path: use local directory if downloaded, otherwise auto-download from Hub
-MODEL_LOCAL = os.path.abspath("./Qwen3-TTS-12Hz-1.7B-CustomVoice")
+# Prefer an explicit local copy next to this script; fall back to HF cache (no re-download)
+MODEL_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "Qwen3-TTS-12Hz-1.7B-CustomVoice")
 MODEL_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-model_path = MODEL_LOCAL if os.path.isdir(MODEL_LOCAL) else MODEL_HF_ID
+
+if os.path.isdir(MODEL_LOCAL):
+    model_path = MODEL_LOCAL
+else:
+    print(f"Local model not found at {MODEL_LOCAL}")
+    print("Resolving from HuggingFace cache (no internet download if already cached)...")
+    model_path = snapshot_download(MODEL_HF_ID)
+
+# CUDA diagnostics — printed before load so GPU status is always visible
+print(f"CUDA available : {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU            : {torch.cuda.get_device_name(0)}")
+    print(f"VRAM           : {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    device = "cuda:0"
+else:
+    print("WARNING: CUDA not available — model will run on CPU (will be very slow)")
+    device = "cpu"
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -19,10 +41,11 @@ try:
 except Exception:
     attn_impl = "sdpa"
 
-print(f"Loading model from: {model_path}  (attn={attn_impl})")
+print(f"Loading model from: {model_path}")
+print(f"  device={device}  attn={attn_impl}")
 model = Qwen3TTSModel.from_pretrained(
     model_path,
-    device_map="cuda:0",
+    device_map=device,
     dtype=torch.bfloat16,
     attn_implementation=attn_impl,
 )
@@ -80,31 +103,101 @@ def crossfade_join(chunks: list[np.ndarray], sr: int,
     return np.concatenate(parts)
 
 
+def pitch_normalize(wavs: list[np.ndarray], sr: int) -> list[np.ndarray]:
+    """
+    Shift each chunk's median pitch to match the first chunk's median pitch.
+    Corrects residual prosodic drift that persists even after voice cloning.
+    Capped at ±3 semitones to avoid unnatural artefacts on short words.
+    """
+    f0_medians = []
+    for w in wavs:
+        f0 = librosa.yin(w, fmin=60, fmax=500, sr=sr)
+        voiced = f0[f0 > 0]
+        f0_medians.append(float(np.median(voiced)) if len(voiced) > 0 else None)
+
+    ref_f0 = next((f for f in f0_medians if f is not None), None)
+    if ref_f0 is None:
+        return wavs
+
+    out = []
+    for w, f0_mean in zip(wavs, f0_medians):
+        if f0_mean is not None and f0_mean > 0 and ref_f0 > 0:
+            shift = 12 * np.log2(ref_f0 / f0_mean)
+            shift = float(np.clip(shift, -3.0, 3.0))
+            if abs(shift) > 0.1:
+                w = librosa.effects.pitch_shift(w, sr=sr, n_steps=shift)
+        out.append(w)
+    return out
+
+
 def generate_lesson(chunks: list[tuple[str, str]], speaker: str,
                     instruct: str) -> tuple[np.ndarray, int]:
     """
-    Generate a language lesson by splitting at language boundaries.
+    Generate a language lesson anchored to a consistent voice.
+
+    Strategy:
+      1. Generate an anchor clip (the first chunk) with generate_custom_voice().
+      2. Pass that anchor as a reference to generate_voice_clone() for all
+         remaining chunks — the model's in-context learning keeps pitch/timbre
+         locked to the anchor across both language switches.
+      3. Apply librosa F0 normalization as a post-processing safety net for
+         any residual pitch drift on very short chunks (<0.5 s).
 
     chunks  : list of (text, language) tuples
-    speaker : single speaker name applied to every chunk
-    instruct: ONE shared instruction string — critical for voice consistency.
-              Do NOT vary this per-language; consistent instruction = consistent prosody.
-
-    Returns (audio_array, sample_rate).
+    speaker : preset speaker name for the anchor
+    instruct: single instruction applied to all segments
     """
     texts = [t for t, _ in chunks]
     langs = [l for _, l in chunks]
 
-    # Single instruct string applied to all segments — keeps voice consistent
-    wavs, sr = model.generate_custom_voice(
-        text=texts,
-        language=langs,
-        speaker=[speaker] * len(texts),
-        instruct=instruct,        # str, not list — uniform voice profile
+    # --- Step 1: generate anchor (first chunk sets the voice reference) ---
+    print(f"  Generating voice anchor ({repr(texts[0][:40])})...")
+    anchor_wavs, sr = model.generate_custom_voice(
+        text=[texts[0]],
+        language=[langs[0]],
+        speaker=[speaker],
+        instruct=instruct,
     )
+    anchor_wav = anchor_wavs[0].astype(np.float32)
+    sf.write(f"anchor_{speaker}.wav", anchor_wav, sr)
 
-    audio = crossfade_join([w for w in wavs], sr, gap_ms=70, fade_ms=12)
-    return audio, sr
+    if len(texts) == 1:
+        return crossfade_join([anchor_wav], sr, gap_ms=70, fade_ms=12), sr
+
+    # --- Step 2: generate remaining chunks conditioned on the anchor ---
+    # Use generate_voice_clone() so every chunk shares the anchor's prosodic profile.
+    # If parameter names differ from expectation, we print the signature and fall back.
+    rest_wavs = None
+    try:
+        rest_result, sr2 = model.generate_voice_clone(
+            text=texts[1:],
+            language=langs[1:],
+            ref_audio=anchor_wav,
+            ref_text=texts[0],
+            sr=sr,
+        )
+        rest_wavs = [w.astype(np.float32) for w in rest_result]
+    except TypeError:
+        print("  generate_voice_clone() signature mismatch — inspecting API...")
+        print(inspect.signature(model.generate_voice_clone))
+        print("  Falling back to generate_custom_voice() for remaining chunks.")
+
+    if rest_wavs is None:
+        # Fallback: generate remaining chunks without voice cloning
+        fallback_wavs, _ = model.generate_custom_voice(
+            text=texts[1:],
+            language=langs[1:],
+            speaker=[speaker] * (len(texts) - 1),
+            instruct=instruct,
+        )
+        rest_wavs = [w.astype(np.float32) for w in fallback_wavs]
+
+    all_wavs = [anchor_wav] + rest_wavs
+
+    # --- Step 3: F0 normalization safety net ---
+    all_wavs = pitch_normalize(all_wavs, sr)
+
+    return crossfade_join(all_wavs, sr, gap_ms=70, fade_ms=12), sr
 
 
 # ---------------------------------------------------------------------------
