@@ -173,17 +173,21 @@ def generate_lesson(chunks: list[tuple[str, str]]) -> tuple[np.ndarray, int]:
     sohee anchor.  Every chunk — English and foreign words alike — inherits
     sohee's pitch, timbre, and speaking style from the reference audio.
     """
-    texts = [t for t, _ in chunks]
-    langs  = [l for _, l in chunks]
+    # Generate each paragraph in its own call — batch mode causes KV-cache bleed
+    # where state from paragraph 1 taints paragraph 2, producing an echo artifact.
+    # Independent calls each condition freshly on the sohee anchor.
+    all_wavs = []
+    sr = anchor_sr
+    for i, (text, lang) in enumerate(chunks, start=1):
+        print(f"  Chunk {i}/{len(chunks)}: {repr(text[:50])}...")
+        wavs, sr = model.generate_voice_clone(
+            text=[text],
+            language=[lang],
+            ref_audio=(anchor_wav, anchor_sr),
+            ref_text=ANCHOR_TEXT,
+        )
+        all_wavs.append(wavs[0].astype(np.float32))
 
-    print(f"  Cloning {len(texts)} chunks from sohee anchor...")
-    wavs, sr = model.generate_voice_clone(
-        text=texts,
-        language=langs,
-        ref_audio=(anchor_wav, anchor_sr),
-        ref_text=ANCHOR_TEXT,
-    )
-    all_wavs = [w.astype(np.float32) for w in wavs]
     all_wavs = pitch_normalize(all_wavs, sr)
     return crossfade_join(all_wavs, sr), sr
 
