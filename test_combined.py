@@ -1,7 +1,6 @@
 import os
 os.environ["ORT_LOGGING_LEVEL"] = "3"  # Suppress ONNX Runtime DRM/OpenCL warnings (unrelated to CUDA)
 
-import inspect
 import time
 import torch
 import numpy as np
@@ -10,19 +9,27 @@ import soundfile as sf
 from huggingface_hub import snapshot_download
 from qwen_tts import Qwen3TTSModel
 
-# Prefer an explicit local copy next to this script; fall back to HF cache (no re-download)
-MODEL_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "Qwen3-TTS-12Hz-1.7B-CustomVoice")
-MODEL_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+# ---------------------------------------------------------------------------
+# Model paths
+# ---------------------------------------------------------------------------
 
-if os.path.isdir(MODEL_LOCAL):
-    model_path = MODEL_LOCAL
-else:
-    print(f"Local model not found at {MODEL_LOCAL}")
-    print("Resolving from HuggingFace cache (no internet download if already cached)...")
-    model_path = snapshot_download(MODEL_HF_ID)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# CUDA diagnostics — printed before load so GPU status is always visible
+# CustomVoice — used only to generate the sohee reference anchor
+CV_LOCAL  = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B-CustomVoice")
+CV_HF_ID  = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+
+# Base model — supports generate_voice_clone(), used for all lesson generation
+BASE_LOCAL = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B")
+BASE_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B"
+
+cv_path   = CV_LOCAL   if os.path.isdir(CV_LOCAL)   else snapshot_download(CV_HF_ID)
+base_path = BASE_LOCAL if os.path.isdir(BASE_LOCAL) else snapshot_download(BASE_HF_ID)
+
+# ---------------------------------------------------------------------------
+# CUDA diagnostics
+# ---------------------------------------------------------------------------
+
 print(f"CUDA available : {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"GPU            : {torch.cuda.get_device_name(0)}")
@@ -41,26 +48,11 @@ try:
 except Exception:
     attn_impl = "sdpa"
 
-print(f"Loading model from: {model_path}")
-print(f"  device={device}  attn={attn_impl}")
-model = Qwen3TTSModel.from_pretrained(
-    model_path,
-    device_map=device,
-    dtype=torch.bfloat16,
-    attn_implementation=attn_impl,
-)
-
-print("Compiling model with torch.compile...")
-model.model = torch.compile(model.model, mode="reduce-overhead")
-print("Model ready.")
-
-
 # ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
 
 def rms_normalize(wav: np.ndarray, target_rms: float = 0.08) -> np.ndarray:
-    """Scale wav so its RMS matches target_rms.  Prevents chunk-to-chunk loudness jumps."""
     rms = np.sqrt(np.mean(wav ** 2))
     if rms < 1e-9:
         return wav
@@ -68,32 +60,22 @@ def rms_normalize(wav: np.ndarray, target_rms: float = 0.08) -> np.ndarray:
 
 
 def crossfade_join(chunks: list[np.ndarray], sr: int,
-                   gap_ms: int = 60, fade_ms: int = 10) -> np.ndarray:
-    """
-    Concatenate audio chunks with a short silence gap and linear cross-fade at each
-    boundary to avoid clicks.  All chunks are RMS-normalised before joining.
-
-    gap_ms   — silence inserted between every chunk (milliseconds)
-    fade_ms  — fade-out / fade-in applied at the boundary (milliseconds)
-    """
+                   gap_ms: int = 70, fade_ms: int = 12) -> np.ndarray:
+    """Concatenate chunks with RMS normalisation, silence gap, and linear crossfade."""
     target_rms = float(np.mean([np.sqrt(np.mean(c ** 2)) for c in chunks if len(c) > 0]))
     target_rms = max(target_rms, 0.02)
-
     normalised = [rms_normalize(c.astype(np.float32), target_rms) for c in chunks]
 
     gap    = np.zeros(int(sr * gap_ms  / 1000), dtype=np.float32)
     fade_n = int(sr * fade_ms / 1000)
-
     fade_out = np.linspace(1.0, 0.0, fade_n, dtype=np.float32)
     fade_in  = np.linspace(0.0, 1.0, fade_n, dtype=np.float32)
 
     parts = []
     for i, chunk in enumerate(normalised):
         c = chunk.copy()
-        # Fade the tail of this chunk
         if len(c) >= fade_n:
             c[-fade_n:] *= fade_out
-        # Fade the head of this chunk
         if len(c) >= fade_n:
             c[:fade_n] *= fade_in
         parts.append(c)
@@ -104,11 +86,7 @@ def crossfade_join(chunks: list[np.ndarray], sr: int,
 
 
 def pitch_normalize(wavs: list[np.ndarray], sr: int) -> list[np.ndarray]:
-    """
-    Shift each chunk's median pitch to match the first chunk's median pitch.
-    Corrects residual prosodic drift that persists even after voice cloning.
-    Capped at ±3 semitones to avoid unnatural artefacts on short words.
-    """
+    """Shift each chunk's median pitch to match the first chunk's. Capped at ±3 semitones."""
     f0_medians = []
     for w in wavs:
         f0 = librosa.yin(w, fmin=60, fmax=500, sr=sr)
@@ -122,94 +100,97 @@ def pitch_normalize(wavs: list[np.ndarray], sr: int) -> list[np.ndarray]:
     out = []
     for w, f0_mean in zip(wavs, f0_medians):
         if f0_mean is not None and f0_mean > 0 and ref_f0 > 0:
-            shift = 12 * np.log2(ref_f0 / f0_mean)
-            shift = float(np.clip(shift, -3.0, 3.0))
+            shift = float(np.clip(12 * np.log2(ref_f0 / f0_mean), -3.0, 3.0))
             if abs(shift) > 0.1:
                 w = librosa.effects.pitch_shift(w, sr=sr, n_steps=shift)
         out.append(w)
     return out
 
+# ---------------------------------------------------------------------------
+# Step 1 — Generate sohee anchor with CustomVoice model
+# The anchor is cached to disk; subsequent runs skip re-generation.
+# ---------------------------------------------------------------------------
 
-def generate_lesson(chunks: list[tuple[str, str]], speaker: str,
-                    instruct: str) -> tuple[np.ndarray, int]:
+ANCHOR_PATH = os.path.join(SCRIPT_DIR, "sohee_anchor.wav")
+ANCHOR_TEXT = (
+    "Hello and welcome. I'm so glad you're here to learn with me today. "
+    "We'll explore some wonderful new words and phrases together, step by step."
+)
+
+if os.path.exists(ANCHOR_PATH):
+    print(f"\nLoading cached sohee anchor: {ANCHOR_PATH}")
+    anchor_wav, anchor_sr = sf.read(ANCHOR_PATH)
+    anchor_wav = anchor_wav.astype(np.float32)
+    print(f"  Duration: {len(anchor_wav)/anchor_sr:.1f}s")
+else:
+    print(f"\nGenerating sohee voice anchor with CustomVoice model...")
+    print(f"  Loading: {cv_path}  (device={device}  attn={attn_impl})")
+    cv_model = Qwen3TTSModel.from_pretrained(
+        cv_path, device_map=device, dtype=torch.bfloat16,
+        attn_implementation=attn_impl,
+    )
+    cv_model.model = torch.compile(cv_model.model, mode="reduce-overhead")
+
+    wavs, anchor_sr = cv_model.generate_custom_voice(
+        text=[ANCHOR_TEXT],
+        language=["english"],
+        speaker=["sohee"],
+        instruct="Warm, friendly female teacher. Clear, steady, natural delivery.",
+    )
+    anchor_wav = wavs[0].astype(np.float32)
+    sf.write(ANCHOR_PATH, anchor_wav, anchor_sr)
+    print(f"  Saved: {ANCHOR_PATH}  ({len(anchor_wav)/anchor_sr:.1f}s)")
+
+    # Free VRAM before loading the base model
+    del cv_model
+    torch.cuda.empty_cache()
+    print("  CustomVoice model unloaded.")
+
+# ---------------------------------------------------------------------------
+# Step 2 — Load base model (supports generate_voice_clone)
+# ---------------------------------------------------------------------------
+
+print(f"\nLoading base model: {base_path}")
+print(f"  device={device}  attn={attn_impl}")
+model = Qwen3TTSModel.from_pretrained(
+    base_path, device_map=device, dtype=torch.bfloat16,
+    attn_implementation=attn_impl,
+)
+model.model = torch.compile(model.model, mode="reduce-overhead")
+print("Base model ready.")
+
+# ---------------------------------------------------------------------------
+# Step 3 — Lesson generation via voice cloning
+# ---------------------------------------------------------------------------
+
+LESSON_INSTRUCT = "Warm, encouraging language teacher. Clear, steady pace."
+
+
+def generate_lesson(chunks: list[tuple[str, str]]) -> tuple[np.ndarray, int]:
     """
-    Generate a language lesson anchored to a consistent voice.
-
-    Strategy:
-      1. Generate an anchor clip (the first chunk) with generate_custom_voice().
-      2. Pass that anchor as a reference to generate_voice_clone() for all
-         remaining chunks — the model's in-context learning keeps pitch/timbre
-         locked to the anchor across both language switches.
-      3. Apply librosa F0 normalization as a post-processing safety net for
-         any residual pitch drift on very short chunks (<0.5 s).
-
-    chunks  : list of (text, language) tuples
-    speaker : preset speaker name for the anchor
-    instruct: single instruction applied to all segments
+    Generate all lesson chunks via generate_voice_clone() conditioned on the
+    sohee anchor.  Every chunk — English and foreign words alike — inherits
+    sohee's pitch, timbre, and speaking style from the reference audio.
     """
     texts = [t for t, _ in chunks]
-    langs = [l for _, l in chunks]
+    langs  = [l for _, l in chunks]
 
-    # --- Step 1: generate anchor (first chunk sets the voice reference) ---
-    print(f"  Generating voice anchor ({repr(texts[0][:40])})...")
-    anchor_wavs, sr = model.generate_custom_voice(
-        text=[texts[0]],
-        language=[langs[0]],
-        speaker=[speaker],
-        instruct=instruct,
+    print(f"  Cloning {len(texts)} chunks from sohee anchor...")
+    wavs, sr = model.generate_voice_clone(
+        text=texts,
+        language=langs,
+        ref_audio=anchor_wav,
+        ref_text=ANCHOR_TEXT,
+        sr=anchor_sr,
     )
-    anchor_wav = anchor_wavs[0].astype(np.float32)
-    sf.write(f"anchor_{speaker}.wav", anchor_wav, sr)
-
-    if len(texts) == 1:
-        return crossfade_join([anchor_wav], sr, gap_ms=70, fade_ms=12), sr
-
-    # --- Step 2: generate remaining chunks conditioned on the anchor ---
-    # Use generate_voice_clone() so every chunk shares the anchor's prosodic profile.
-    # If parameter names differ from expectation, we print the signature and fall back.
-    rest_wavs = None
-    try:
-        rest_result, sr2 = model.generate_voice_clone(
-            text=texts[1:],
-            language=langs[1:],
-            ref_audio=anchor_wav,
-            ref_text=texts[0],
-            sr=sr,
-        )
-        rest_wavs = [w.astype(np.float32) for w in rest_result]
-    except TypeError:
-        print("  generate_voice_clone() signature mismatch — inspecting API...")
-        print(inspect.signature(model.generate_voice_clone))
-        print("  Falling back to generate_custom_voice() for remaining chunks.")
-
-    if rest_wavs is None:
-        # Fallback: generate remaining chunks without voice cloning
-        fallback_wavs, _ = model.generate_custom_voice(
-            text=texts[1:],
-            language=langs[1:],
-            speaker=[speaker] * (len(texts) - 1),
-            instruct=instruct,
-        )
-        rest_wavs = [w.astype(np.float32) for w in fallback_wavs]
-
-    all_wavs = [anchor_wav] + rest_wavs
-
-    # --- Step 3: F0 normalization safety net ---
+    all_wavs = [w.astype(np.float32) for w in wavs]
     all_wavs = pitch_normalize(all_wavs, sr)
-
-    return crossfade_join(all_wavs, sr, gap_ms=70, fade_ms=12), sr
+    return crossfade_join(all_wavs, sr), sr
 
 
 # ---------------------------------------------------------------------------
 # LESSON 1 — Japanese
-# Single instruct: teacher voice that adapts pronunciation per language tag
 # ---------------------------------------------------------------------------
-
-JP_INSTRUCT = (
-    "Warm, encouraging language teacher with a clear and steady voice. "
-    "Speak at a measured pace throughout — both English and Japanese words should "
-    "feel like they come from the same calm, friendly speaker."
-)
 
 jp_chunks = [
     # Greetings
@@ -248,12 +229,6 @@ jp_chunks = [
 # ---------------------------------------------------------------------------
 # LESSON 2 — Mandarin Chinese
 # ---------------------------------------------------------------------------
-
-ZH_INSTRUCT = (
-    "Warm, enthusiastic language teacher with a clear and steady voice. "
-    "Speak at a measured pace throughout — both English and Chinese words should "
-    "feel like they come from the same calm, friendly speaker."
-)
 
 zh_chunks = [
     # Greetings
@@ -299,18 +274,18 @@ zh_chunks = [
 ]
 
 # ---------------------------------------------------------------------------
-# Generate both lessons
+# Generate lessons
 # ---------------------------------------------------------------------------
 
 print("\n--- Generating Japanese lesson ---")
 t0 = time.time()
-jp_audio, sr = generate_lesson(jp_chunks, speaker="ryan", instruct=JP_INSTRUCT)
+jp_audio, sr = generate_lesson(jp_chunks)
 print(f"Japanese lesson: {len(jp_audio)/sr:.1f}s  ({time.time()-t0:.1f}s gen time)")
 sf.write("japanese_lesson.wav", jp_audio, sr)
 
 print("\n--- Generating Chinese lesson ---")
 t0 = time.time()
-zh_audio, sr = generate_lesson(zh_chunks, speaker="vivian", instruct=ZH_INSTRUCT)
+zh_audio, sr = generate_lesson(zh_chunks)
 print(f"Chinese lesson:  {len(zh_audio)/sr:.1f}s  ({time.time()-t0:.1f}s gen time)")
 sf.write("chinese_lesson.wav", zh_audio, sr)
 
@@ -320,14 +295,13 @@ sf.write("chinese_lesson.wav", zh_audio, sr)
 
 pause = np.zeros(int(sr * 3.0), dtype=np.float32)
 combined = np.concatenate([jp_audio, pause, zh_audio])
-
-out_path = "combined_output.wav"
-sf.write(out_path, combined, sr)
+sf.write("combined_output.wav", combined, sr)
 
 total_duration = len(combined) / sr
-file_size_kb = os.path.getsize(out_path) / 1024
+file_size_kb = os.path.getsize("combined_output.wav") / 1024
 
 print(f"\nSaved:")
+print(f"  sohee_anchor.wav     — {len(anchor_wav)/anchor_sr:.1f}s  (voice reference)")
 print(f"  japanese_lesson.wav  — {len(jp_audio)/sr:.1f}s")
 print(f"  chinese_lesson.wav   — {len(zh_audio)/sr:.1f}s")
 print(f"  combined_output.wav  — {total_duration:.1f}s  ({file_size_kb:.1f} KB)")
