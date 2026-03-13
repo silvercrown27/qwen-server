@@ -75,9 +75,11 @@ def crossfade_join(chunks: list[np.ndarray], sr: int,
     parts = []
     for i, chunk in enumerate(normalised):
         c = chunk.copy()
-        if len(c) >= fade_n:
+        # Only fade out the end of chunks that are followed by another chunk
+        if i < len(normalised) - 1 and len(c) >= fade_n:
             c[-fade_n:] *= fade_out
-        if len(c) >= fade_n:
+        # Only fade in the start of chunks that follow another chunk
+        if i > 0 and len(c) >= fade_n:
             c[:fade_n] *= fade_in
         parts.append(c)
         if i < len(normalised) - 1:
@@ -115,7 +117,8 @@ def pitch_normalize(wavs: list[np.ndarray], sr: int) -> list[np.ndarray]:
 ANCHOR_PATH = os.path.join(SCRIPT_DIR, "sohee_anchor.wav")
 ANCHOR_TEXT = (
     "Hello and welcome. I'm so glad you're here to learn with me today. "
-    "We'll explore some wonderful new words and phrases together, step by step."
+    "Let's take this step by step, and don't worry if things feel new at first. "
+    "By the end of our time together, you'll be amazed at how much you've learned."
 )
 
 if os.path.exists(ANCHOR_PATH):
@@ -130,7 +133,7 @@ else:
         cv_path, device_map=device, dtype=torch.bfloat16,
         attn_implementation=attn_impl,
     )
-    cv_model.model = torch.compile(cv_model.model, mode="reduce-overhead")
+    cv_model.model = torch.compile(cv_model.model, mode="default")
 
     wavs, anchor_sr = cv_model.generate_custom_voice(
         text=[ANCHOR_TEXT],
@@ -157,7 +160,7 @@ model = Qwen3TTSModel.from_pretrained(
     base_path, device_map=device, dtype=torch.bfloat16,
     attn_implementation=attn_impl,
 )
-model.model = torch.compile(model.model, mode="reduce-overhead")
+model.model = torch.compile(model.model, mode="default")
 print("Base model ready.")
 
 # ---------------------------------------------------------------------------
