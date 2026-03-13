@@ -20,30 +20,12 @@ CV_LOCAL  = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B-CustomVoice")
 CV_HF_ID  = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 
 # Base model — supports generate_voice_clone(), used for all lesson generation
-BASE_LOCAL = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B")
-BASE_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B"
+# Public model, Apache 2.0, no token required
+BASE_LOCAL = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B-Base")
+BASE_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
-# Qwen3-TTS-12Hz-1.7B (base) is a gated model on HuggingFace.
-# To download it:
-#   1. Accept the model terms at https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B
-#   2. Generate an access token at https://huggingface.co/settings/tokens
-#   3. Set the environment variable:  export HF_TOKEN=hf_xxxxxxxxxxxxxxxx
-HF_TOKEN = os.environ.get("HF_TOKEN")
-
-def resolve_model(local: str, hf_id: str, token: str | None = None) -> str:
-    if os.path.isdir(local):
-        return local
-    if token is None and hf_id == BASE_HF_ID:
-        raise EnvironmentError(
-            f"\nBase model '{hf_id}' is gated and requires authentication.\n"
-            "  1. Accept terms at: https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B\n"
-            "  2. Generate a token at: https://huggingface.co/settings/tokens\n"
-            "  3. Re-run with:  HF_TOKEN=hf_xxx python test_combined.py"
-        )
-    return snapshot_download(hf_id, token=token)
-
-cv_path   = resolve_model(CV_LOCAL,   CV_HF_ID,   HF_TOKEN)
-base_path = resolve_model(BASE_LOCAL, BASE_HF_ID, HF_TOKEN)
+cv_path   = CV_LOCAL   if os.path.isdir(CV_LOCAL)   else snapshot_download(CV_HF_ID)
+base_path = BASE_LOCAL if os.path.isdir(BASE_LOCAL) else snapshot_download(BASE_HF_ID)
 
 # ---------------------------------------------------------------------------
 # CUDA diagnostics
