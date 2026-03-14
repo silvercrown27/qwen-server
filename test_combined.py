@@ -147,7 +147,7 @@ else:
     print(f"  Loading: {cv_path}  (device={device}  attn={attn_impl})")
     cv_model = Qwen3TTSModel.from_pretrained(
         cv_path, device_map=device, dtype=torch.bfloat16,
-        attn_implementation=attn_impl,
+        torch_dtype=torch.bfloat16, attn_implementation=attn_impl,
     )
     cv_model.model = torch.compile(cv_model.model, mode="default")
 
@@ -174,7 +174,7 @@ print(f"\nLoading base model: {base_path}")
 print(f"  device={device}  attn={attn_impl}")
 model = Qwen3TTSModel.from_pretrained(
     base_path, device_map=device, dtype=torch.bfloat16,
-    attn_implementation=attn_impl,
+    torch_dtype=torch.bfloat16, attn_implementation=attn_impl,
 )
 print("Base model ready.")
 
