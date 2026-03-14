@@ -1,6 +1,7 @@
 import os
 os.environ["ORT_LOGGING_LEVEL"] = "3"  # Suppress ONNX Runtime DRM/OpenCL warnings (unrelated to CUDA)
 
+import subprocess
 import time
 import torch
 import numpy as np
@@ -131,11 +132,7 @@ def pitch_normalize(wavs: list[np.ndarray], sr: int) -> list[np.ndarray]:
 # ---------------------------------------------------------------------------
 
 ANCHOR_PATH = os.path.join(SCRIPT_DIR, "sohee_anchor.wav")
-ANCHOR_TEXT = (
-    "Hello and welcome. I'm so glad you're here to learn with me today. "
-    "Let's take this step by step, and don't worry if things feel new at first. "
-    "By the end of our time together, you'll be amazed at how much you've learned."
-)
+ANCHOR_TEXT = "Hello and welcome. I'm so glad you're here to learn with me today."
 
 if os.path.exists(ANCHOR_PATH):
     print(f"\nLoading cached sohee anchor: {ANCHOR_PATH}")
@@ -155,7 +152,10 @@ else:
         text=[ANCHOR_TEXT],
         language=["english"],
         speaker=["sohee"],
-        instruct="Warm, friendly female teacher. Clear, steady, natural delivery.",
+        instruct=(
+            "Speak at a consistent, moderate volume. Lively and animated, with a fun sense "
+            "of urgency — enthusiastic delivery that makes learning feel exciting and rewarding."
+        ),
     )
     anchor_wav = wavs[0].astype(np.float32)
     sf.write(ANCHOR_PATH, anchor_wav, anchor_sr)
@@ -176,37 +176,45 @@ model = Qwen3TTSModel.from_pretrained(
     base_path, device_map=device, dtype=torch.bfloat16,
     torch_dtype=torch.bfloat16, attn_implementation=attn_impl,
 )
+model.model = torch.compile(model.model, mode="reduce-overhead")
 print("Base model ready.")
+
+print("Pre-computing voice clone prompt from anchor...")
+voice_prompt = model.create_voice_clone_prompt(
+    ref_audio=(anchor_wav, anchor_sr),
+    ref_text=ANCHOR_TEXT,
+)
+print("Voice prompt cached.")
 
 # ---------------------------------------------------------------------------
 # Step 3 — Lesson generation via voice cloning
 # ---------------------------------------------------------------------------
 
-LESSON_INSTRUCT = "Warm, encouraging language teacher. Clear, steady pace."
+def generate_segment(text: str, lang: str = "english", label: str = "") -> tuple[np.ndarray, int]:
+    """Generate a single audio segment conditioned on the sohee voice anchor.
+    Mirrors server's generate_audio_for_transcript() — one WAV per call."""
+    if label:
+        print(f"  [{label}] {repr(text[:60])}...")
+    wavs, sr = model.generate_voice_clone(
+        text=[text],
+        language=[lang],
+        voice_clone_prompt=voice_prompt,
+    )
+    return wavs[0].astype(np.float32), sr
 
 
-def generate_lesson(chunks: list[tuple[str, str]]) -> tuple[np.ndarray, int]:
-    """
-    Generate all lesson chunks via generate_voice_clone() conditioned on the
-    sohee anchor.  Every chunk — English and foreign words alike — inherits
-    sohee's pitch, timbre, and speaking style from the reference audio.
-    """
-    # Generate each paragraph in its own call — batch mode causes KV-cache bleed
-    # where state from paragraph 1 taints paragraph 2, producing an echo artifact.
-    # Independent calls each condition freshly on the sohee anchor.
-    all_wavs = []
-    sr = anchor_sr
-    for i, (text, lang) in enumerate(chunks, start=1):
-        print(f"  Chunk {i}/{len(chunks)}: {repr(text[:50])}...")
-        wavs, sr = model.generate_voice_clone(
-            text=[text],
-            language=[lang],
-            ref_audio=(anchor_wav, anchor_sr),
-            ref_text=ANCHOR_TEXT,
-        )
-        all_wavs.append(wavs[0].astype(np.float32))
-
-    return crossfade_join(all_wavs, sr), sr
+def ffmpeg_concat(wav_paths: list[str], output_path: str, sr: int) -> None:
+    """Concatenate WAV files using FFmpeg — mirrors server's merge_audio_files_sequential()."""
+    concat_list = output_path.replace(".wav", "_concat.txt")
+    with open(concat_list, "w") as f:
+        for p in wav_paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    subprocess.run(
+        ["ffmpeg", "-f", "concat", "-safe", "0", "-i", concat_list,
+         "-c", "copy", "-y", output_path],
+        check=True, capture_output=True,
+    )
+    os.remove(concat_list)
 
 
 # ---------------------------------------------------------------------------
@@ -269,34 +277,63 @@ zh_chunks = [
 ]
 
 # ---------------------------------------------------------------------------
-# Generate lessons
+# Segments — mirrors server's intro → scene_0…N → outro structure
+# Each segment is generated independently and saved as its own WAV file,
+# then merged with FFmpeg — identical to AudioManager.generate_and_merge_audio_for_video()
 # ---------------------------------------------------------------------------
 
-print("\n--- Generating Japanese lesson ---")
-t0 = time.time()
-jp_audio, sr = generate_lesson(jp_chunks)
-print(f"Japanese lesson: {len(jp_audio)/sr:.1f}s  ({time.time()-t0:.1f}s gen time)")
-sf.write("japanese_lesson.wav", jp_audio, sr)
+INTRO = (
+    "Welcome to PinnLab! Today we're diving into two fascinating languages — "
+    "Japanese and Mandarin Chinese. Get ready to learn!"
+)
+OUTRO = (
+    "Amazing work! You've just taken your first steps into Japanese and Mandarin. "
+    "Keep practising — every word brings you closer to fluency!"
+)
 
-print("\n--- Generating Chinese lesson ---")
-t0 = time.time()
-zh_audio, sr = generate_lesson(zh_chunks)
-print(f"Chinese lesson:  {len(zh_audio)/sr:.1f}s  ({time.time()-t0:.1f}s gen time)")
-sf.write("chinese_lesson.wav", zh_audio, sr)
+# Build ordered segment list: intro → JP chunks → ZH chunks → outro
+segments: list[tuple[str, str, str]] = (
+    [("intro", INTRO, "english")]
+    + [(f"jp_{i}", t, l) for i, (t, l) in enumerate(jp_chunks)]
+    + [(f"zh_{i}", t, l) for i, (t, l) in enumerate(zh_chunks)]
+    + [("outro", OUTRO, "english")]
+)
 
 # ---------------------------------------------------------------------------
-# Combine: Japanese → 3 s pause → Chinese
+# Generate all segments (server-parallel: one WAV file per segment)
 # ---------------------------------------------------------------------------
 
-pause = np.zeros(int(sr * 3.0), dtype=np.float32)
-combined = np.concatenate([jp_audio, pause, zh_audio])
-sf.write("combined_output.wav", combined, sr)
+print(f"\n--- Generating {len(segments)} segments ---")
+t_total = time.time()
 
-total_duration = len(combined) / sr
-file_size_kb = os.path.getsize("combined_output.wav") / 1024
+wav_paths: list[str] = []
+sr = anchor_sr
+
+for label, text, lang in segments:
+    t0 = time.time()
+    wav, sr = generate_segment(text, lang, label=label)
+    path = os.path.join(SCRIPT_DIR, f"seg_{label}.wav")
+    sf.write(path, wav, sr)
+    wav_paths.append(path)
+    print(f"    → {len(wav)/sr:.1f}s  ({time.time()-t0:.1f}s gen)")
+
+print(f"\nAll segments generated in {time.time()-t_total:.1f}s total")
+
+# ---------------------------------------------------------------------------
+# Merge with FFmpeg — mirrors server's merge_audio_files_sequential()
+# ---------------------------------------------------------------------------
+
+output_path = os.path.join(SCRIPT_DIR, "combined_output.wav")
+print(f"\nMerging {len(wav_paths)} segments with FFmpeg...")
+ffmpeg_concat(wav_paths, output_path, sr)
+
+total_duration = os.path.getsize(output_path) / (sr * 2)  # 16-bit PCM
+file_size_kb = os.path.getsize(output_path) / 1024
 
 print(f"\nSaved:")
-print(f"  sohee_anchor.wav     — {len(anchor_wav)/anchor_sr:.1f}s  (voice reference)")
-print(f"  japanese_lesson.wav  — {len(jp_audio)/sr:.1f}s")
-print(f"  chinese_lesson.wav   — {len(zh_audio)/sr:.1f}s")
-print(f"  combined_output.wav  — {total_duration:.1f}s  ({file_size_kb:.1f} KB)")
+print(f"  sohee_anchor.wav  — {len(anchor_wav)/anchor_sr:.1f}s  (voice reference)")
+for p in wav_paths:
+    name = os.path.basename(p)
+    dur = sf.info(p).duration
+    print(f"  {name:<28} — {dur:.1f}s")
+print(f"  combined_output.wav — {total_duration:.1f}s  ({file_size_kb:.1f} KB)")
