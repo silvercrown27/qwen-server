@@ -9,6 +9,22 @@ import soundfile as sf
 from huggingface_hub import snapshot_download
 from qwen_tts import Qwen3TTSModel
 
+
+def resolve_model(local_path: str, hf_id: str) -> str:
+    """Return local model dir. Once cached, never contacts the network.
+    Download order: explicit local dir → HF disk cache → network download."""
+    # 1. Explicit local copy (e.g. downloaded to script dir)
+    if os.path.isdir(local_path):
+        return local_path
+    # 2. HF disk cache — no network request
+    try:
+        return snapshot_download(hf_id, local_files_only=True)
+    except Exception:
+        pass
+    # 3. Not cached at all — download once, then cache handles it forever
+    print(f"  Downloading {hf_id} from HuggingFace (one-time)...")
+    return snapshot_download(hf_id)
+
 # ---------------------------------------------------------------------------
 # Model paths
 # ---------------------------------------------------------------------------
@@ -24,8 +40,8 @@ CV_HF_ID  = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 BASE_LOCAL = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B-Base")
 BASE_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
-cv_path   = CV_LOCAL   if os.path.isdir(CV_LOCAL)   else snapshot_download(CV_HF_ID)
-base_path = BASE_LOCAL if os.path.isdir(BASE_LOCAL) else snapshot_download(BASE_HF_ID)
+cv_path   = resolve_model(CV_LOCAL,   CV_HF_ID)
+base_path = resolve_model(BASE_LOCAL, BASE_HF_ID)
 
 # ---------------------------------------------------------------------------
 # CUDA diagnostics
@@ -45,7 +61,7 @@ torch.backends.cudnn.allow_tf32 = True
 
 try:
     import flash_attn  # noqa: F401
-    attn_impl = "flash_attention_2"
+    attn_impl = "flash_attention_2" if torch.cuda.is_available() else "sdpa"
 except Exception:
     attn_impl = "sdpa"
 
