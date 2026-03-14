@@ -160,7 +160,6 @@ model = Qwen3TTSModel.from_pretrained(
     base_path, device_map=device, dtype=torch.bfloat16,
     attn_implementation=attn_impl,
 )
-model.model = torch.compile(model.model, mode="default")
 print("Base model ready.")
 
 # ---------------------------------------------------------------------------
@@ -191,7 +190,6 @@ def generate_lesson(chunks: list[tuple[str, str]]) -> tuple[np.ndarray, int]:
         )
         all_wavs.append(wavs[0].astype(np.float32))
 
-    all_wavs = pitch_normalize(all_wavs, sr)
     return crossfade_join(all_wavs, sr), sr
 
 
@@ -217,12 +215,12 @@ jp_chunks = [
      "This works like excuse me or I'm sorry, depending on context.",
      "english"),
 
-    # Paragraph 3: Numbers 1–5
-    ("Now let's count from one to five. "
-     "One is いち. Two is に. Three is さん. "
-     "Four is し, or sometimes よん. And five is ご. "
-     "You might recognise those from martial arts — great work!",
-     "english"),
+    # Paragraph 3: Numbers 1–5 (split into sentences — short isolated chars cause
+    # phase-vocoder artefacts when bundled; one sentence per call avoids this)
+    ("Now let's count from one to five.", "english"),
+    ("One is いち. Two is に.", "english"),
+    ("Three is さん. Four is し, or sometimes よん.", "english"),
+    ("And five is ご. You might recognise those from martial arts — great work!", "english"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -246,16 +244,12 @@ zh_chunks = [
      "And if something is delicious, say 好吃, which literally means good to eat.",
      "english"),
 
-    # Paragraph 3: The four tones
-    ("Mandarin has four tones that completely change meaning. "
-     "Listen to the syllable ma in each tone. "
-     "First tone — 妈 — means mother. "
-     "Second tone — 麻 — means hemp or numb. "
-     "Third tone — 马 — means horse. "
-     "Fourth tone — 骂 — means to scold. "
-     "Now here is a classic tongue twister using all four: 妈妈骂马吗. "
-     "Which means: does mother scold the horse? Fantastic listening!",
-     "english"),
+    # Paragraph 3: The four tones (split into sentences — dense single-char tonal
+    # words in one chunk cause phase-vocoder artefacts; one call per sentence avoids this)
+    ("Mandarin has four tones that completely change meaning. Listen to the syllable ma in each tone.", "english"),
+    ("First tone — 妈 — means mother. Second tone — 麻 — means hemp or numb.", "english"),
+    ("Third tone — 马 — means horse. Fourth tone — 骂 — means to scold.", "english"),
+    ("Now here is a classic tongue twister using all four: 妈妈骂马吗. Which means: does mother scold the horse? Fantastic listening!", "english"),
 ]
 
 # ---------------------------------------------------------------------------
