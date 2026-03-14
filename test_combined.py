@@ -144,7 +144,7 @@ else:
     print(f"  Loading: {cv_path}  (device={device}  attn={attn_impl})")
     cv_model = Qwen3TTSModel.from_pretrained(
         cv_path, device_map=device, dtype=torch.bfloat16,
-        torch_dtype=torch.bfloat16, attn_implementation=attn_impl,
+        attn_implementation=attn_impl,
     )
     cv_model.model = torch.compile(cv_model.model, mode="default")
 
@@ -174,15 +174,15 @@ print(f"\nLoading base model: {base_path}")
 print(f"  device={device}  attn={attn_impl}")
 model = Qwen3TTSModel.from_pretrained(
     base_path, device_map=device, dtype=torch.bfloat16,
-    torch_dtype=torch.bfloat16, attn_implementation=attn_impl,
+    attn_implementation=attn_impl,
 )
-model.model = torch.compile(model.model, mode="reduce-overhead")
+model.model = torch.compile(model.model, mode="default")
 print("Base model ready.")
 
-print("Pre-computing voice clone prompt from anchor...")
+print("Pre-computing voice clone prompt from anchor (x_vector_only)...")
 voice_prompt = model.create_voice_clone_prompt(
     ref_audio=(anchor_wav, anchor_sr),
-    ref_text=ANCHOR_TEXT,
+    x_vector_only_mode=True,
 )
 print("Voice prompt cached.")
 
@@ -190,17 +190,21 @@ print("Voice prompt cached.")
 # Step 3 — Lesson generation via voice cloning
 # ---------------------------------------------------------------------------
 
-def generate_segment(text: str, lang: str = "english", label: str = "") -> tuple[np.ndarray, int]:
-    """Generate a single audio segment conditioned on the sohee voice anchor.
-    Mirrors server's generate_audio_for_transcript() — one WAV per call."""
-    if label:
-        print(f"  [{label}] {repr(text[:60])}...")
+BATCH_SIZE = 4
+
+
+def generate_batch(batch: list[tuple[str, str]]) -> list[tuple[np.ndarray, int]]:
+    """Generate multiple segments in a single GPU call.
+    Safe to batch because x_vector_only_mode has no shared ICL speech tokens
+    that could bleed between items (the echo artifact seen with ICL batching)."""
+    texts = [t for t, _ in batch]
+    langs = [l for _, l in batch]
     wavs, sr = model.generate_voice_clone(
-        text=[text],
-        language=[lang],
+        text=texts,
+        language=langs,
         voice_clone_prompt=voice_prompt,
     )
-    return wavs[0].astype(np.float32), sr
+    return [(w.astype(np.float32), sr) for w in wavs]
 
 
 def ffmpeg_concat(wav_paths: list[str], output_path: str, sr: int) -> None:
@@ -303,19 +307,26 @@ segments: list[tuple[str, str, str]] = (
 # Generate all segments (server-parallel: one WAV file per segment)
 # ---------------------------------------------------------------------------
 
-print(f"\n--- Generating {len(segments)} segments ---")
+n_batches = (len(segments) + BATCH_SIZE - 1) // BATCH_SIZE
+print(f"\n--- Generating {len(segments)} segments in {n_batches} batches (batch_size={BATCH_SIZE}) ---")
 t_total = time.time()
 
 wav_paths: list[str] = []
 sr = anchor_sr
 
-for label, text, lang in segments:
+for b in range(0, len(segments), BATCH_SIZE):
+    batch_meta = segments[b:b + BATCH_SIZE]
+    batch_inputs = [(text, lang) for _, text, lang in batch_meta]
+    labels = [label for label, _, _ in batch_meta]
+    print(f"  Batch {b//BATCH_SIZE + 1}/{n_batches}: {labels}")
     t0 = time.time()
-    wav, sr = generate_segment(text, lang, label=label)
-    path = os.path.join(SCRIPT_DIR, f"seg_{label}.wav")
-    sf.write(path, wav, sr)
-    wav_paths.append(path)
-    print(f"    → {len(wav)/sr:.1f}s  ({time.time()-t0:.1f}s gen)")
+    results = generate_batch(batch_inputs)
+    for (label, text, lang), (wav, sr) in zip(batch_meta, results):
+        path = os.path.join(SCRIPT_DIR, f"seg_{label}.wav")
+        sf.write(path, wav, sr)
+        wav_paths.append(path)
+        print(f"    [{label}] {len(wav)/sr:.1f}s audio")
+    print(f"    → batch done in {time.time()-t0:.1f}s")
 
 print(f"\nAll segments generated in {time.time()-t_total:.1f}s total")
 
