@@ -67,6 +67,44 @@ except Exception:
     attn_impl = "sdpa"
 
 # ---------------------------------------------------------------------------
+# Language detection helpers
+# ---------------------------------------------------------------------------
+
+# Unicode ranges for scripts that require a non-English phoneme model.
+# Any chunk containing at least one character from these ranges gets
+# language="auto" so the model's internal code-switcher handles it,
+# rather than forcing English phonetics onto foreign characters.
+_FOREIGN_SCRIPT_RANGES = [
+    (0x3040, 0x9FFF),   # Hiragana, Katakana, CJK Unified Ideographs (JP + ZH)
+    (0xAC00, 0xD7FF),   # Hangul syllables (KO)
+    (0x0400, 0x052F),   # Cyrillic (RU + others)
+    (0x0600, 0x06FF),   # Arabic
+]
+
+
+def _has_foreign_script(text: str) -> bool:
+    """True if text contains any character from a non-Latin script."""
+    return any(
+        lo <= ord(ch) <= hi
+        for ch in text
+        for lo, hi in _FOREIGN_SCRIPT_RANGES
+    )
+
+
+def chunk_language(text: str, primary_language: str = "english") -> str:
+    """Return the language code to use for a generation call.
+
+    - If primary_language is already a specific foreign code, use it as-is.
+    - If the chunk is pure English (no foreign script), use "english".
+    - If the chunk mixes English with foreign script, use "auto" so the
+      model detects script boundaries internally — no audio stitching needed.
+    """
+    if primary_language != "english":
+        return primary_language
+    return "auto" if _has_foreign_script(text) else "english"
+
+
+# ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
 
@@ -296,10 +334,12 @@ OUTRO = (
 )
 
 # Build ordered segment list: intro → JP chunks → ZH chunks → outro
+# chunk_language() returns "auto" for mixed-script chunks so the model's
+# internal code-switcher handles Japanese/Chinese phonetics natively.
 segments: list[tuple[str, str, str]] = (
     [("intro", INTRO, "english")]
-    + [(f"jp_{i}", t, l) for i, (t, l) in enumerate(jp_chunks)]
-    + [(f"zh_{i}", t, l) for i, (t, l) in enumerate(zh_chunks)]
+    + [(f"jp_{i}", t, chunk_language(t)) for i, (t, _) in enumerate(jp_chunks)]
+    + [(f"zh_{i}", t, chunk_language(t)) for i, (t, _) in enumerate(zh_chunks)]
     + [("outro", OUTRO, "english")]
 )
 
@@ -325,7 +365,7 @@ for b in range(0, len(segments), BATCH_SIZE):
         path = os.path.join(SCRIPT_DIR, f"seg_{label}.wav")
         sf.write(path, wav, sr)
         wav_paths.append(path)
-        print(f"    [{label}] {len(wav)/sr:.1f}s audio")
+        print(f"    [{label}] lang={lang!r}  {len(wav)/sr:.1f}s audio")
     print(f"    → batch done in {time.time()-t0:.1f}s")
 
 print(f"\nAll segments generated in {time.time()-t_total:.1f}s total")
