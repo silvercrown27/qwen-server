@@ -8,11 +8,11 @@ snapshot_download(
     local_dir_use_symlinks=False,
 )
 
-# CustomVoice model — preset speakers (sohee, ryan, vivian, etc.)
-print("Downloading CustomVoice model...")
+# VoiceDesign model — supports generate_voice_design() for natural-language voice creation
+print("Downloading VoiceDesign model...")
 snapshot_download(
-    repo_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-    local_dir="./Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    repo_id="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    local_dir="./Qwen3-TTS-12Hz-1.7B-VoiceDesign",
     local_dir_use_symlinks=False,
 )
 

@@ -32,16 +32,15 @@ def resolve_model(local_path: str, hf_id: str) -> str:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# CustomVoice — used only to generate the sohee reference anchor
-CV_LOCAL  = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B-CustomVoice")
-CV_HF_ID  = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+# VoiceDesign model — supports generate_voice_design() for natural-language voice creation
+VD_LOCAL  = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B-VoiceDesign")
+VD_HF_ID  = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 
 # Base model — supports generate_voice_clone(), used for all lesson generation
-# Public model, Apache 2.0, no token required
 BASE_LOCAL = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B-Base")
 BASE_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
-cv_path   = resolve_model(CV_LOCAL,   CV_HF_ID)
+vd_path   = resolve_model(VD_LOCAL,   VD_HF_ID)
 base_path = resolve_model(BASE_LOCAL, BASE_HF_ID)
 
 # ---------------------------------------------------------------------------
@@ -198,8 +197,15 @@ if os.path.exists(ANCHOR_PATH):
     anchor_wav = anchor_wav.astype(np.float32)
     print(f"  Duration: {len(anchor_wav)/anchor_sr:.1f}s")
 else:
-    print(f"\nGenerating host voice anchor via voice design...")
-    wavs, anchor_sr = model.generate_voice_design(
+    print(f"\nGenerating host voice anchor with VoiceDesign model...")
+    print(f"  Loading: {vd_path}  (device={device}  attn={attn_impl})")
+    vd_model = Qwen3TTSModel.from_pretrained(
+        vd_path, device_map=device, dtype=torch.bfloat16,
+        attn_implementation=attn_impl,
+    )
+    vd_model.model = torch.compile(vd_model.model, mode="default")
+
+    wavs, anchor_sr = vd_model.generate_voice_design(
         text=ANCHOR_TEXT,
         language="english",
         instruct=VOICE_INSTRUCT,
@@ -207,6 +213,10 @@ else:
     anchor_wav = wavs[0].astype(np.float32)
     sf.write(ANCHOR_PATH, anchor_wav, anchor_sr)
     print(f"  Saved: {ANCHOR_PATH}  ({len(anchor_wav)/anchor_sr:.1f}s)")
+
+    del vd_model
+    torch.cuda.empty_cache()
+    print("  VoiceDesign model unloaded.")
 
 print("Pre-computing voice clone prompt from anchor (x_vector_only)...")
 voice_prompt = model.create_voice_clone_prompt(
