@@ -165,16 +165,13 @@ def pitch_normalize(wavs: list[np.ndarray], sr: int) -> list[np.ndarray]:
     return out
 
 # ---------------------------------------------------------------------------
-# Step 1 — Generate host voice anchor with CustomVoice model (voice design)
-# The anchor is cached to disk; subsequent runs skip re-generation.
+# Step 1 — Load base model (supports both generate_voice_design and generate_voice_clone)
 # ---------------------------------------------------------------------------
 
 ANCHOR_PATH = os.path.join(SCRIPT_DIR, "host_anchor.wav")
 ANCHOR_TEXT = "Hello and welcome. I'm so glad you're here to learn with me today!"
 
 # Voice design instruction — natural language blueprint for the host character.
-# Uses generate_voice_design() so the voice is fully synthesised from description
-# rather than anchored to a preset speaker.
 VOICE_INSTRUCT = (
     "Female British English presenter. Young adult to middle-aged. "
     "Bright, clear vocal texture with highly articulate and distinct pronunciation. "
@@ -186,38 +183,6 @@ VOICE_INSTRUCT = (
     "Confident, extroverted, and engaging personality."
 )
 
-if os.path.exists(ANCHOR_PATH):
-    print(f"\nLoading cached host anchor: {ANCHOR_PATH}")
-    anchor_wav, anchor_sr = sf.read(ANCHOR_PATH)
-    anchor_wav = anchor_wav.astype(np.float32)
-    print(f"  Duration: {len(anchor_wav)/anchor_sr:.1f}s")
-else:
-    print(f"\nGenerating host voice anchor with CustomVoice model (voice design)...")
-    print(f"  Loading: {cv_path}  (device={device}  attn={attn_impl})")
-    cv_model = Qwen3TTSModel.from_pretrained(
-        cv_path, device_map=device, dtype=torch.bfloat16,
-        attn_implementation=attn_impl,
-    )
-    cv_model.model = torch.compile(cv_model.model, mode="default")
-
-    wavs, anchor_sr = cv_model.generate_voice_design(
-        text=ANCHOR_TEXT,
-        language="english",
-        instruct=VOICE_INSTRUCT,
-    )
-    anchor_wav = wavs[0].astype(np.float32)
-    sf.write(ANCHOR_PATH, anchor_wav, anchor_sr)
-    print(f"  Saved: {ANCHOR_PATH}  ({len(anchor_wav)/anchor_sr:.1f}s)")
-
-    # Free VRAM before loading the base model
-    del cv_model
-    torch.cuda.empty_cache()
-    print("  CustomVoice model unloaded.")
-
-# ---------------------------------------------------------------------------
-# Step 2 — Load base model (supports generate_voice_clone)
-# ---------------------------------------------------------------------------
-
 print(f"\nLoading base model: {base_path}")
 print(f"  device={device}  attn={attn_impl}")
 model = Qwen3TTSModel.from_pretrained(
@@ -226,6 +191,22 @@ model = Qwen3TTSModel.from_pretrained(
 )
 model.model = torch.compile(model.model, mode="default")
 print("Base model ready.")
+
+if os.path.exists(ANCHOR_PATH):
+    print(f"\nLoading cached host anchor: {ANCHOR_PATH}")
+    anchor_wav, anchor_sr = sf.read(ANCHOR_PATH)
+    anchor_wav = anchor_wav.astype(np.float32)
+    print(f"  Duration: {len(anchor_wav)/anchor_sr:.1f}s")
+else:
+    print(f"\nGenerating host voice anchor via voice design...")
+    wavs, anchor_sr = model.generate_voice_design(
+        text=ANCHOR_TEXT,
+        language="english",
+        instruct=VOICE_INSTRUCT,
+    )
+    anchor_wav = wavs[0].astype(np.float32)
+    sf.write(ANCHOR_PATH, anchor_wav, anchor_sr)
+    print(f"  Saved: {ANCHOR_PATH}  ({len(anchor_wav)/anchor_sr:.1f}s)")
 
 print("Pre-computing voice clone prompt from anchor (x_vector_only)...")
 voice_prompt = model.create_voice_clone_prompt(
