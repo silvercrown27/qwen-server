@@ -165,20 +165,34 @@ def pitch_normalize(wavs: list[np.ndarray], sr: int) -> list[np.ndarray]:
     return out
 
 # ---------------------------------------------------------------------------
-# Step 1 — Generate sohee anchor with CustomVoice model
+# Step 1 — Generate host voice anchor with CustomVoice model (voice design)
 # The anchor is cached to disk; subsequent runs skip re-generation.
 # ---------------------------------------------------------------------------
 
-ANCHOR_PATH = os.path.join(SCRIPT_DIR, "sohee_anchor.wav")
-ANCHOR_TEXT = "Hello and welcome. I'm so glad you're here to learn with me today."
+ANCHOR_PATH = os.path.join(SCRIPT_DIR, "host_anchor.wav")
+ANCHOR_TEXT = "Hello and welcome. I'm so glad you're here to learn with me today!"
+
+# Voice design instruction — natural language blueprint for the host character.
+# Uses generate_voice_design() so the voice is fully synthesised from description
+# rather than anchored to a preset speaker.
+VOICE_INSTRUCT = (
+    "Female British English presenter. Young adult to middle-aged. "
+    "Bright, clear vocal texture with highly articulate and distinct pronunciation. "
+    "Pitch sits in a low-to-mid female range with significant upward inflections for "
+    "emphasis and excitement. Fast-paced delivery with deliberate dramatic pauses. "
+    "Loud and projecting volume that increases notably during praise and announcements. "
+    "Very fluent — no hesitations. Enthusiastic and excited emotion, especially when "
+    "complimenting the listener. Upbeat, authoritative, and performative tone. "
+    "Confident, extroverted, and engaging personality."
+)
 
 if os.path.exists(ANCHOR_PATH):
-    print(f"\nLoading cached sohee anchor: {ANCHOR_PATH}")
+    print(f"\nLoading cached host anchor: {ANCHOR_PATH}")
     anchor_wav, anchor_sr = sf.read(ANCHOR_PATH)
     anchor_wav = anchor_wav.astype(np.float32)
     print(f"  Duration: {len(anchor_wav)/anchor_sr:.1f}s")
 else:
-    print(f"\nGenerating sohee voice anchor with CustomVoice model...")
+    print(f"\nGenerating host voice anchor with CustomVoice model (voice design)...")
     print(f"  Loading: {cv_path}  (device={device}  attn={attn_impl})")
     cv_model = Qwen3TTSModel.from_pretrained(
         cv_path, device_map=device, dtype=torch.bfloat16,
@@ -186,14 +200,10 @@ else:
     )
     cv_model.model = torch.compile(cv_model.model, mode="default")
 
-    wavs, anchor_sr = cv_model.generate_custom_voice(
-        text=[ANCHOR_TEXT],
-        language=["english"],
-        speaker=["sohee"],
-        instruct=(
-            "Speak at a consistent, moderate volume. Lively and animated, with a fun sense "
-            "of urgency — enthusiastic delivery that makes learning feel exciting and rewarding."
-        ),
+    wavs, anchor_sr = cv_model.generate_voice_design(
+        text=ANCHOR_TEXT,
+        language="english",
+        instruct=VOICE_INSTRUCT,
     )
     anchor_wav = wavs[0].astype(np.float32)
     sf.write(ANCHOR_PATH, anchor_wav, anchor_sr)
@@ -382,7 +392,7 @@ total_duration = os.path.getsize(output_path) / (sr * 2)  # 16-bit PCM
 file_size_kb = os.path.getsize(output_path) / 1024
 
 print(f"\nSaved:")
-print(f"  sohee_anchor.wav  — {len(anchor_wav)/anchor_sr:.1f}s  (voice reference)")
+print(f"  host_anchor.wav   — {len(anchor_wav)/anchor_sr:.1f}s  (voice reference)")
 for p in wav_paths:
     name = os.path.basename(p)
     dur = sf.info(p).duration
