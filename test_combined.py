@@ -162,16 +162,7 @@ if cuda_ok:
     mem = torch.cuda.memory_allocated() / 1024**3
     log.debug(f"  VRAM allocated: {mem:.2f} GB")
 
-# x_vector_only=True: encodes only the speaker embedding — no ICL speech tokens.
-# This prompt is built once and reused for every segment, avoiding the per-segment
-# ref-audio re-encoding cost of full ICL mode.
-log.info("Pre-computing voice clone prompt (x_vector_only=True)...")
-t0 = time.time()
-voice_prompt = model.create_voice_clone_prompt(
-    ref_audio=(anchor_wav, anchor_sr),
-    x_vector_only_mode=True,
-)
-log.info(f"Voice prompt cached in {time.time()-t0:.2f}s")
+log.info("Base model ready.")
 
 # ---------------------------------------------------------------------------
 # Step 3 — Segments (English only)
@@ -196,52 +187,31 @@ segments: list[tuple[str, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Step 4 — Sequential generation with anchored x-vector prompting
+# Step 4 — Single-pass generation using voice_anchor.wav
 #
-# Every segment uses a prompt built from:  anchor_wav + tail of previous segment
-# concatenated together. The anchor dominates the x-vector so the designed voice
-# character is preserved across all segments, while the short tail gives the
-# model just enough recent prosodic context to avoid cold-start energy jumps.
+# voice_anchor.wav is the saved outro from a previous run — the voice at its
+# most settled, natural state. Every segment is cloned from it using full ICL
+# mode (x_vector_only=False) so the model has real speech tokens to match
+# pitch, pace, and timbre against. The same prompt is reused for all segments
+# — no chaining, no drift.
 #
-# ANCHOR_WEIGHT controls how much anchor audio vs tail audio is included:
-#   - anchor contributes ANCHOR_WEIGHT seconds (always the full designed voice)
-#   - tail contributes TAIL_S seconds (recent prosodic state)
-#   - x_vector_only=True so no speech tokens are prepended — clean output, no trimming
-#
-# This prevents the compounding drift that occurs when the prompt is rebuilt
-# purely from each segment's tail (x-vector drifts further each step).
+# If voice_anchor.wav does not exist (first run), we fall back to
+# host_anchor.wav (VoiceDesign output) and generate normally. The outro from
+# that run is saved as voice_anchor.wav so all future runs use it.
 # ---------------------------------------------------------------------------
 
-ANCHOR_WEIGHT   = 3.0   # seconds of anchor audio prepended to every ref
-TAIL_S          = 1.0   # seconds of previous segment appended after anchor
-TOKENS_PER_CHAR = 0.86
-TOKEN_HEADROOM  = 1.5
-TOKEN_MIN       = 256
-TOKEN_MAX       = 2048
+TOKENS_PER_CHAR    = 0.86
+TOKEN_HEADROOM     = 1.5
+TOKEN_MIN          = 256
+TOKEN_MAX          = 2048
+
+VOICE_ANCHOR_PATH  = os.path.join(SCRIPT_DIR, "voice_anchor.wav")
+OUTRO_TEXT         = segments[-1][1]
 
 
 def tokens_for_text(text: str) -> int:
     estimate = int(len(text) * TOKENS_PER_CHAR * TOKEN_HEADROOM)
     return max(TOKEN_MIN, min(TOKEN_MAX, estimate))
-
-
-def build_prompt(ref_audio: np.ndarray, ref_sr: int,
-                 tail_wav: np.ndarray | None, tail_sr: int) -> list:
-    """Build an x_vector_only prompt from anchor + optional tail concatenated."""
-    if tail_wav is not None and len(tail_wav) > 0:
-        # Resample tail to anchor sr if needed (they should match, but be safe)
-        if tail_sr != ref_sr:
-            import librosa
-            tail_wav = librosa.resample(tail_wav, orig_sr=tail_sr, target_sr=ref_sr)
-        combined = np.concatenate([ref_audio, tail_wav])
-        log.debug(f"  Prompt ref: {len(ref_audio)/ref_sr:.2f}s anchor + {len(tail_wav)/ref_sr:.2f}s tail = {len(combined)/ref_sr:.2f}s total")
-    else:
-        combined = ref_audio
-        log.debug(f"  Prompt ref: {len(combined)/ref_sr:.2f}s anchor only (first segment)")
-    return model.create_voice_clone_prompt(
-        ref_audio=(combined, ref_sr),
-        x_vector_only_mode=True,
-    )
 
 
 def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
@@ -262,57 +232,66 @@ def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
     log.debug(f"  FFmpeg exit code: {result.returncode}")
 
 
-# Anchor slice: use the last ANCHOR_WEIGHT seconds of the designed anchor audio
-# (the end of the anchor is the most natural speech — avoids the ramp-up at the start).
-anchor_n = int(anchor_sr * ANCHOR_WEIGHT)
-anchor_slice = anchor_wav[-anchor_n:] if len(anchor_wav) >= anchor_n else anchor_wav
-log.info(f"Anchor slice: {len(anchor_slice)/anchor_sr:.2f}s  (last {ANCHOR_WEIGHT}s of host_anchor.wav)")
+if os.path.exists(VOICE_ANCHOR_PATH):
+    log.info(f"Loading voice anchor: {VOICE_ANCHOR_PATH}")
+    ref_wav, ref_sr = sf.read(VOICE_ANCHOR_PATH)
+    ref_wav = ref_wav.astype(np.float32)
+    ref_text = OUTRO_TEXT
+    log.info(f"  {len(ref_wav)/ref_sr:.2f}s @ {ref_sr} Hz")
+else:
+    log.info("voice_anchor.wav not found — first run, using host_anchor.wav")
+    log.info("voice_anchor.wav will be created from the outro of this run.")
+    ref_wav, ref_sr = anchor_wav, anchor_sr
+    ref_text = ANCHOR_TEXT
 
-log.info(f"Starting generation — {len(segments)} segments  (anchored x-vector, ANCHOR_WEIGHT={ANCHOR_WEIGHT}s + TAIL_S={TAIL_S}s)")
+log.info("Building ICL voice clone prompt (x_vector_only=False)...")
+t0 = time.time()
+clone_prompt = model.create_voice_clone_prompt(
+    ref_audio=(ref_wav, ref_sr),
+    ref_text=ref_text,
+    x_vector_only_mode=False,
+)
+log.info(f"Clone prompt built in {time.time()-t0:.2f}s")
+
+log.info(f"Starting generation — {len(segments)} segments")
 t_total = time.time()
 
 wav_paths: list[str] = []
-prev_tail: np.ndarray | None = None
-prev_sr: int = anchor_sr
 
 for i, (label, text) in enumerate(segments):
     max_tok = tokens_for_text(text)
-
     log.info(f"[{i+1}/{len(segments)}] Segment '{label}'  ({len(text)} chars  max_new_tokens={max_tok})")
     log.debug(f"  Text: {text!r}")
-
-    prompt = build_prompt(anchor_slice, anchor_sr, prev_tail, prev_sr)
-
     t0 = time.time()
+
     wavs, sr = model.generate_voice_clone(
         text=text,
         language="english",
-        voice_clone_prompt=prompt,
+        voice_clone_prompt=clone_prompt,
         max_new_tokens=max_tok,
     )
     wav = wavs[0].astype(np.float32)
-
     elapsed = time.time() - t0
     duration = len(wav) / sr
-    rtf = elapsed / duration if duration > 0 else 0
+    log.info(f"  Done: {duration:.2f}s audio  gen={elapsed:.1f}s  RTF={elapsed/duration:.2f}x")
 
     path = os.path.join(SCRIPT_DIR, f"seg_{label}.wav")
     sf.write(path, wav, sr)
     wav_paths.append(path)
-    log.info(f"  Done: {duration:.2f}s audio  gen={elapsed:.1f}s  RTF={rtf:.2f}x  saved={path}")
 
     if cuda_ok:
         mem = torch.cuda.memory_allocated() / 1024**3
         log.debug(f"  VRAM allocated: {mem:.2f} GB")
 
-    # Extract tail from this segment for next iteration
-    tail_n = int(sr * TAIL_S)
-    prev_tail = wav[-tail_n:] if len(wav) >= tail_n else wav
-    prev_sr = sr
+# Save the outro as voice_anchor.wav for all future runs
+outro_path = os.path.join(SCRIPT_DIR, "seg_outro.wav")
+outro_wav, outro_sr = sf.read(outro_path)
+sf.write(VOICE_ANCHOR_PATH, outro_wav, outro_sr)
+log.info(f"voice_anchor.wav updated from seg_outro.wav  ({len(outro_wav)/outro_sr:.2f}s)")
 
 total_elapsed = time.time() - t_total
 total_audio = sum(sf.info(p).duration for p in wav_paths)
-log.info(f"All segments done — {total_audio:.1f}s audio generated in {total_elapsed:.1f}s  (RTF={total_elapsed/total_audio:.2f}x)")
+log.info(f"All segments done — {total_audio:.1f}s audio in {total_elapsed:.1f}s  (RTF={total_elapsed/total_audio:.2f}x)")
 
 # ---------------------------------------------------------------------------
 # Merge
