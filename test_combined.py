@@ -114,24 +114,24 @@ VOICE_CONFIGS = {
     },
     "host_sample_02": {
         "anchor_text": (
-            "Hello everyone, and welcome. It is wonderful to have you here today. "
-            "What we are about to explore together is genuinely fascinating, "
-            "and I am very much looking forward to sharing it with you."
+            "Good evening. I have spent many years exploring this subject, "
+            "and what continues to move me is how much of it still surprises me. "
+            "I hope that by the end of today, it surprises you too."
         ),
         "instruct": (
-            "A 58-year-old British female broadcaster and educator, warm and highly experienced. "
-            "Her voice is smooth and velvety — a rich mezzo-soprano with natural warmth and depth. "
-            "Fundamental frequency around 185 to 200 Hz, mature and full but not heavy. "
-            "Her tone is honeyed and fluid — there is a natural musicality to her speech, "
-            "with gentle melodic rises on interesting ideas that feel effortless and unhurried. "
-            "Pace is relaxed and comfortable — around 105 words per minute. "
-            "She breathes naturally between thoughts, never cramming words together. "
-            "Pauses are generous and confident — she is never in a hurry. "
-            "Her enthusiasm is expressed through warmth and brightness rather than energy spikes — "
-            "she sounds like someone who genuinely delights in sharing knowledge, smiling as she speaks. "
-            "Received pronunciation British English, beautifully articulated but never stiff. "
-            "No upspeak, no vocal fry. Statements resolve with warm falling intonation. "
-            "Her personality is gracious, intelligent, nurturing, and quietly captivating."
+            "A 62-year-old British female documentary narrator and senior academic. "
+            "Her voice is notably deep and smooth for a woman — a full contralto sitting between 155 and 170 Hz. "
+            "Decades of presenting and lecturing have given her voice a worn-in, effortless quality — "
+            "rich with chest resonance, rounded vowels, and absolutely no breathiness or thinness. "
+            "Her tone is calm, smooth, and deeply reassuring — the kind of voice that immediately "
+            "commands trust and attention without raising itself. "
+            "Pace is measured and unhurried — around 105 words per minute — with long, confident pauses "
+            "between ideas that feel like space rather than hesitation. "
+            "Her enthusiasm is mature and understated: a quiet intensity that builds behind the words "
+            "rather than sitting on top of them. She does not exclaim — she draws you in. "
+            "Received pronunciation British English, impeccably articulated but completely natural. "
+            "No upspeak, no vocal fry, no rising terminals. Every statement lands with quiet finality. "
+            "Her personality is deeply knowledgeable, serene, warmly authoritative, and compelling."
         ),
     },
 }
