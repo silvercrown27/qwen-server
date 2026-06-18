@@ -93,7 +93,9 @@ VOICE_INSTRUCT = (
     "Fundamental frequency around 165 to 180 Hz, noticeably lower than a young woman's voice. "
     "Her pitch range is moderate — she uses expressive upward inflections on key words and moments of "
     "excitement, but always returns to a low, grounded baseline. "
-    "Pace is measured, around 130 words per minute, energised and forward-moving but never rushed. "
+    "Pace is slow and deliberate — around 110 words per minute. She never rushes. "
+    "She takes natural breath pauses between clauses and allows each idea to land fully before moving on. "
+    "Longer pauses after key concepts give the listener time to absorb what was just said. "
     "Articulation is precise and crisp — received pronunciation British English. "
     "Her enthusiasm is vivid and infectious — she genuinely loves the subject and lets it show, "
     "leaning into exciting ideas with increased energy and a brighter tone, like a professor who "
@@ -302,6 +304,8 @@ for i, (label, text) in enumerate(segments):
         language="english",
         voice_clone_prompt=clone_prompt,
         max_new_tokens=max_tok,
+        temperature=0.7,
+        repetition_penalty=1.02,
     )
     wav = wavs[0].astype(np.float32)
     elapsed = time.time() - t0
