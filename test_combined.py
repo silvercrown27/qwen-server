@@ -196,21 +196,24 @@ segments: list[tuple[str, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Step 4 — Sequential generation with x-vector-from-tail chaining
+# Step 4 — Sequential generation with anchored x-vector prompting
 #
-# For every segment after the first:
-#   - Extract the last TAIL_S seconds of the previous segment's audio.
-#   - Build a new x_vector_only prompt from that tail audio.
-#   - The x-vector encodes the speaker's current energy, pitch, and pace state
-#     so the model starts each segment from where the previous one ended.
-#   - x_vector_only=True means NO speech tokens are prepended to the output,
-#     so the generated audio is clean new content with nothing to trim.
+# Every segment uses a prompt built from:  anchor_wav + tail of previous segment
+# concatenated together. The anchor dominates the x-vector so the designed voice
+# character is preserved across all segments, while the short tail gives the
+# model just enough recent prosodic context to avoid cold-start energy jumps.
 #
-# This avoids the glitching caused by ICL full-mode trimming (codec frame
-# misalignment and variable overlap reproduction length).
+# ANCHOR_WEIGHT controls how much anchor audio vs tail audio is included:
+#   - anchor contributes ANCHOR_WEIGHT seconds (always the full designed voice)
+#   - tail contributes TAIL_S seconds (recent prosodic state)
+#   - x_vector_only=True so no speech tokens are prepended — clean output, no trimming
+#
+# This prevents the compounding drift that occurs when the prompt is rebuilt
+# purely from each segment's tail (x-vector drifts further each step).
 # ---------------------------------------------------------------------------
 
-TAIL_S          = 2.0   # seconds of previous segment used to update x-vector
+ANCHOR_WEIGHT   = 3.0   # seconds of anchor audio prepended to every ref
+TAIL_S          = 1.0   # seconds of previous segment appended after anchor
 TOKENS_PER_CHAR = 0.86
 TOKEN_HEADROOM  = 1.5
 TOKEN_MIN       = 256
@@ -220,6 +223,25 @@ TOKEN_MAX       = 2048
 def tokens_for_text(text: str) -> int:
     estimate = int(len(text) * TOKENS_PER_CHAR * TOKEN_HEADROOM)
     return max(TOKEN_MIN, min(TOKEN_MAX, estimate))
+
+
+def build_prompt(ref_audio: np.ndarray, ref_sr: int,
+                 tail_wav: np.ndarray | None, tail_sr: int) -> list:
+    """Build an x_vector_only prompt from anchor + optional tail concatenated."""
+    if tail_wav is not None and len(tail_wav) > 0:
+        # Resample tail to anchor sr if needed (they should match, but be safe)
+        if tail_sr != ref_sr:
+            import librosa
+            tail_wav = librosa.resample(tail_wav, orig_sr=tail_sr, target_sr=ref_sr)
+        combined = np.concatenate([ref_audio, tail_wav])
+        log.debug(f"  Prompt ref: {len(ref_audio)/ref_sr:.2f}s anchor + {len(tail_wav)/ref_sr:.2f}s tail = {len(combined)/ref_sr:.2f}s total")
+    else:
+        combined = ref_audio
+        log.debug(f"  Prompt ref: {len(combined)/ref_sr:.2f}s anchor only (first segment)")
+    return model.create_voice_clone_prompt(
+        ref_audio=(combined, ref_sr),
+        x_vector_only_mode=True,
+    )
 
 
 def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
@@ -240,23 +262,32 @@ def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
     log.debug(f"  FFmpeg exit code: {result.returncode}")
 
 
-log.info(f"Starting generation — {len(segments)} segments  (x-vector-from-tail chaining, TAIL_S={TAIL_S})")
+# Anchor slice: use the last ANCHOR_WEIGHT seconds of the designed anchor audio
+# (the end of the anchor is the most natural speech — avoids the ramp-up at the start).
+anchor_n = int(anchor_sr * ANCHOR_WEIGHT)
+anchor_slice = anchor_wav[-anchor_n:] if len(anchor_wav) >= anchor_n else anchor_wav
+log.info(f"Anchor slice: {len(anchor_slice)/anchor_sr:.2f}s  (last {ANCHOR_WEIGHT}s of host_anchor.wav)")
+
+log.info(f"Starting generation — {len(segments)} segments  (anchored x-vector, ANCHOR_WEIGHT={ANCHOR_WEIGHT}s + TAIL_S={TAIL_S}s)")
 t_total = time.time()
 
 wav_paths: list[str] = []
-current_prompt = voice_prompt  # anchor x_vector for first segment
+prev_tail: np.ndarray | None = None
+prev_sr: int = anchor_sr
 
 for i, (label, text) in enumerate(segments):
     max_tok = tokens_for_text(text)
 
     log.info(f"[{i+1}/{len(segments)}] Segment '{label}'  ({len(text)} chars  max_new_tokens={max_tok})")
     log.debug(f"  Text: {text!r}")
-    t0 = time.time()
 
+    prompt = build_prompt(anchor_slice, anchor_sr, prev_tail, prev_sr)
+
+    t0 = time.time()
     wavs, sr = model.generate_voice_clone(
         text=text,
         language="english",
-        voice_clone_prompt=current_prompt,
+        voice_clone_prompt=prompt,
         max_new_tokens=max_tok,
     )
     wav = wavs[0].astype(np.float32)
@@ -274,14 +305,10 @@ for i, (label, text) in enumerate(segments):
         mem = torch.cuda.memory_allocated() / 1024**3
         log.debug(f"  VRAM allocated: {mem:.2f} GB")
 
-    # Build next prompt from tail of this segment's audio.
+    # Extract tail from this segment for next iteration
     tail_n = int(sr * TAIL_S)
-    tail_wav = wav[-tail_n:] if len(wav) >= tail_n else wav
-    log.debug(f"  Updating x-vector from {len(tail_wav)/sr:.2f}s tail audio")
-    current_prompt = model.create_voice_clone_prompt(
-        ref_audio=(tail_wav, sr),
-        x_vector_only_mode=True,
-    )
+    prev_tail = wav[-tail_n:] if len(wav) >= tail_n else wav
+    prev_sr = sr
 
 total_elapsed = time.time() - t_total
 total_audio = sum(sf.info(p).duration for p in wav_paths)
