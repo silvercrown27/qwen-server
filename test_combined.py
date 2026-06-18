@@ -81,18 +81,24 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 ANCHOR_PATH = os.path.join(SCRIPT_DIR, "host_anchor.wav")
-ANCHOR_TEXT = "Hello and welcome. I'm delighted to have you here — let's get started."
+ANCHOR_TEXT = (
+    "Good morning, everyone. Before we begin, I want you to know that the concepts "
+    "we cover today will fundamentally change how you see the world around you. "
+    "I have been teaching this for over twenty years, and it still fascinates me."
+)
 
 VOICE_INSTRUCT = (
-    "Female British English instructor. Middle-aged, approximately 45 to 55 years old. "
-    "Warm, rich, and slightly deeper female voice with a composed, measured delivery. "
-    "Highly articulate and distinct pronunciation with a refined British accent. "
-    "Moderately paced — deliberate and clear, never rushed, with natural pauses for emphasis. "
-    "Enthusiastic and encouraging but in a calm, assured way — the warmth of a seasoned teacher "
-    "who genuinely enjoys the subject, not a high-energy presenter. "
-    "Steady volume with gentle lifts on key concepts and words of encouragement. "
-    "Very fluent, no hesitations. Authoritative yet approachable tone. "
-    "Mature, confident, and intellectually engaging personality."
+    "A 52-year-old British female university professor with over two decades of teaching experience. "
+    "Her voice is deep for a woman — a low contralto, with strong chest resonance and no breathiness. "
+    "Fundamental frequency around 165 to 180 Hz, noticeably lower than a young woman's voice. "
+    "Her pitch range is narrow and controlled — she does not use high upward inflections. "
+    "Pace is slow and deliberate, around 120 words per minute, with long confident pauses between ideas. "
+    "Articulation is precise and unhurried — received pronunciation British English. "
+    "Her tone is warm but weighty, carrying the gravitas of long experience. "
+    "Emotion is enthusiastic in an intellectual, measured way — she lights up on interesting concepts "
+    "but never sounds excitable or girlish. "
+    "No vocal fry, no upspeak, no rising terminals. Statements end with falling intonation. "
+    "Her personality projects calm authority, deep knowledge, and genuine care for the listener."
 )
 
 # ---------------------------------------------------------------------------
