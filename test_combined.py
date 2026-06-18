@@ -91,14 +91,15 @@ VOICE_INSTRUCT = (
     "A 52-year-old British female university professor with over two decades of teaching experience. "
     "Her voice is deep for a woman — a low contralto, with strong chest resonance and no breathiness. "
     "Fundamental frequency around 165 to 180 Hz, noticeably lower than a young woman's voice. "
-    "Her pitch range is narrow and controlled — she does not use high upward inflections. "
-    "Pace is slow and deliberate, around 120 words per minute, with long confident pauses between ideas. "
-    "Articulation is precise and unhurried — received pronunciation British English. "
-    "Her tone is warm but weighty, carrying the gravitas of long experience. "
-    "Emotion is enthusiastic in an intellectual, measured way — she lights up on interesting concepts "
-    "but never sounds excitable or girlish. "
-    "No vocal fry, no upspeak, no rising terminals. Statements end with falling intonation. "
-    "Her personality projects calm authority, deep knowledge, and genuine care for the listener."
+    "Her pitch range is moderate — she uses expressive upward inflections on key words and moments of "
+    "excitement, but always returns to a low, grounded baseline. "
+    "Pace is measured, around 130 words per minute, energised and forward-moving but never rushed. "
+    "Articulation is precise and crisp — received pronunciation British English. "
+    "Her enthusiasm is vivid and infectious — she genuinely loves the subject and lets it show, "
+    "leaning into exciting ideas with increased energy and a brighter tone, like a professor who "
+    "still gets a spark of joy every time she explains a concept she finds beautiful. "
+    "Statements end with falling intonation — no upspeak, no vocal fry. "
+    "Her personality is warm, intellectually passionate, authoritative, and deeply engaging."
 )
 
 # ---------------------------------------------------------------------------
@@ -195,47 +196,30 @@ segments: list[tuple[str, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Step 4 — Sequential generation with overlap-prepend chaining
+# Step 4 — Sequential generation with x-vector-from-tail chaining
 #
 # For every segment after the first:
-#   1. Take the last OVERLAP_S seconds of the previous segment's audio as the
-#      ICL reference ("tail"). The model hears where it just left off and
-#      continues from that prosodic state rather than cold-starting.
-#   2. Generate: the model prepends the tail tokens internally, then produces
-#      the new segment's tokens.
-#   3. Trim: the output includes the re-generated tail region at the front.
-#      We discard exactly that many samples before saving, so the final WAV
-#      contains only the new content — no duplication in the merged output.
+#   - Extract the last TAIL_S seconds of the previous segment's audio.
+#   - Build a new x_vector_only prompt from that tail audio.
+#   - The x-vector encodes the speaker's current energy, pitch, and pace state
+#     so the model starts each segment from where the previous one ended.
+#   - x_vector_only=True means NO speech tokens are prepended to the output,
+#     so the generated audio is clean new content with nothing to trim.
 #
-# The first segment uses the anchor x_vector prompt (no tail yet).
-#
-# max_new_tokens is scaled per segment to avoid burning the full 2048-token
-# budget on short segments. Estimate: ~0.86 codec tokens/char × 1.5 headroom,
-# clamped to [256, 2048]. The overlap tokens for the tail are added on top.
+# This avoids the glitching caused by ICL full-mode trimming (codec frame
+# misalignment and variable overlap reproduction length).
 # ---------------------------------------------------------------------------
 
-OVERLAP_S       = 1.5   # seconds of previous segment to feed as ICL context
+TAIL_S          = 2.0   # seconds of previous segment used to update x-vector
 TOKENS_PER_CHAR = 0.86
 TOKEN_HEADROOM  = 1.5
 TOKEN_MIN       = 256
 TOKEN_MAX       = 2048
-# Codec runs at 12 Hz — used to estimate how many output samples to trim.
-CODEC_HZ        = 12
 
 
 def tokens_for_text(text: str) -> int:
     estimate = int(len(text) * TOKENS_PER_CHAR * TOKEN_HEADROOM)
     return max(TOKEN_MIN, min(TOKEN_MAX, estimate))
-
-
-def tokens_for_overlap(overlap_s: float) -> int:
-    return int(overlap_s * CODEC_HZ)
-
-
-def trim_overlap(wav: np.ndarray, sr: int, overlap_s: float) -> np.ndarray:
-    """Remove the leading overlap region from generated output."""
-    n = int(sr * overlap_s)
-    return wav[n:] if len(wav) > n else wav
 
 
 def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
@@ -256,55 +240,26 @@ def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
     log.debug(f"  FFmpeg exit code: {result.returncode}")
 
 
-log.info(f"Starting generation — {len(segments)} segments  (overlap-prepend chaining, OVERLAP_S={OVERLAP_S})")
+log.info(f"Starting generation — {len(segments)} segments  (x-vector-from-tail chaining, TAIL_S={TAIL_S})")
 t_total = time.time()
 
 wav_paths: list[str] = []
-prev_wav: np.ndarray | None = None   # audio from the previous segment
-prev_sr: int = 0
+current_prompt = voice_prompt  # anchor x_vector for first segment
 
 for i, (label, text) in enumerate(segments):
-    is_first = (i == 0)
-    overlap_tok = tokens_for_overlap(OVERLAP_S) if not is_first else 0
-    max_tok = tokens_for_text(text) + overlap_tok
-    max_tok = min(max_tok, TOKEN_MAX)
+    max_tok = tokens_for_text(text)
 
     log.info(f"[{i+1}/{len(segments)}] Segment '{label}'  ({len(text)} chars  max_new_tokens={max_tok})")
     log.debug(f"  Text: {text!r}")
     t0 = time.time()
 
-    if is_first:
-        # No previous audio yet — use the anchor x_vector prompt.
-        prompt = voice_prompt
-        log.debug("  Using anchor x_vector prompt (first segment)")
-    else:
-        # Build ICL prompt from the tail of the previous segment.
-        tail_n = int(prev_sr * OVERLAP_S)
-        tail_wav = prev_wav[-tail_n:] if len(prev_wav) >= tail_n else prev_wav
-        # Approximate tail transcript: last portion of previous text scaled by overlap ratio.
-        tail_chars = int(len(prev_text) * (OVERLAP_S / (len(prev_wav) / prev_sr)))
-        tail_chars = max(20, min(tail_chars, len(prev_text)))
-        tail_text = prev_text[-tail_chars:]
-        log.debug(f"  Building ICL prompt from {len(tail_wav)/prev_sr:.2f}s tail  tail_text: {tail_text!r}")
-        prompt = model.create_voice_clone_prompt(
-            ref_audio=(tail_wav, prev_sr),
-            ref_text=tail_text,
-            x_vector_only_mode=False,
-        )
-
     wavs, sr = model.generate_voice_clone(
         text=text,
         language="english",
-        voice_clone_prompt=prompt,
+        voice_clone_prompt=current_prompt,
         max_new_tokens=max_tok,
     )
     wav = wavs[0].astype(np.float32)
-
-    if not is_first:
-        # Trim the re-generated overlap from the front of the output.
-        pre_trim = len(wav)
-        wav = trim_overlap(wav, sr, OVERLAP_S)
-        log.debug(f"  Trimmed {pre_trim - len(wav)} samples ({OVERLAP_S}s overlap) from output start")
 
     elapsed = time.time() - t0
     duration = len(wav) / sr
@@ -319,10 +274,14 @@ for i, (label, text) in enumerate(segments):
         mem = torch.cuda.memory_allocated() / 1024**3
         log.debug(f"  VRAM allocated: {mem:.2f} GB")
 
-    # Store for next iteration
-    prev_wav  = wavs[0].astype(np.float32)  # untrimmed — tail is taken from full output
-    prev_sr   = sr
-    prev_text = text
+    # Build next prompt from tail of this segment's audio.
+    tail_n = int(sr * TAIL_S)
+    tail_wav = wav[-tail_n:] if len(wav) >= tail_n else wav
+    log.debug(f"  Updating x-vector from {len(tail_wav)/sr:.2f}s tail audio")
+    current_prompt = model.create_voice_clone_prompt(
+        ref_audio=(tail_wav, sr),
+        x_vector_only_mode=True,
+    )
 
 total_elapsed = time.time() - t_total
 total_audio = sum(sf.info(p).duration for p in wav_paths)
