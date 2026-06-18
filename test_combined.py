@@ -195,24 +195,47 @@ segments: list[tuple[str, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Step 4 — Sequential generation
+# Step 4 — Sequential generation with overlap-prepend chaining
 #
-# x_vector prompt is reused for every segment (no re-encoding).
-# max_new_tokens is capped per segment based on text length so short segments
-# don't burn the full 2048-token budget waiting for an EOS that never comes.
-# Approx 12 codec tokens/s × estimated speech rate of ~14 chars/s → ~0.86 tok/char.
-# We add a 50% headroom buffer and clamp to [256, 2048].
+# For every segment after the first:
+#   1. Take the last OVERLAP_S seconds of the previous segment's audio as the
+#      ICL reference ("tail"). The model hears where it just left off and
+#      continues from that prosodic state rather than cold-starting.
+#   2. Generate: the model prepends the tail tokens internally, then produces
+#      the new segment's tokens.
+#   3. Trim: the output includes the re-generated tail region at the front.
+#      We discard exactly that many samples before saving, so the final WAV
+#      contains only the new content — no duplication in the merged output.
+#
+# The first segment uses the anchor x_vector prompt (no tail yet).
+#
+# max_new_tokens is scaled per segment to avoid burning the full 2048-token
+# budget on short segments. Estimate: ~0.86 codec tokens/char × 1.5 headroom,
+# clamped to [256, 2048]. The overlap tokens for the tail are added on top.
 # ---------------------------------------------------------------------------
 
+OVERLAP_S       = 1.5   # seconds of previous segment to feed as ICL context
 TOKENS_PER_CHAR = 0.86
-TOKEN_HEADROOM   = 1.5
-TOKEN_MIN        = 256
-TOKEN_MAX        = 2048
+TOKEN_HEADROOM  = 1.5
+TOKEN_MIN       = 256
+TOKEN_MAX       = 2048
+# Codec runs at 12 Hz — used to estimate how many output samples to trim.
+CODEC_HZ        = 12
 
 
 def tokens_for_text(text: str) -> int:
     estimate = int(len(text) * TOKENS_PER_CHAR * TOKEN_HEADROOM)
     return max(TOKEN_MIN, min(TOKEN_MAX, estimate))
+
+
+def tokens_for_overlap(overlap_s: float) -> int:
+    return int(overlap_s * CODEC_HZ)
+
+
+def trim_overlap(wav: np.ndarray, sr: int, overlap_s: float) -> np.ndarray:
+    """Remove the leading overlap region from generated output."""
+    n = int(sr * overlap_s)
+    return wav[n:] if len(wav) > n else wav
 
 
 def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
@@ -233,24 +256,56 @@ def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
     log.debug(f"  FFmpeg exit code: {result.returncode}")
 
 
-log.info(f"Starting generation — {len(segments)} segments  (x_vector prompt, scaled max_new_tokens)")
+log.info(f"Starting generation — {len(segments)} segments  (overlap-prepend chaining, OVERLAP_S={OVERLAP_S})")
 t_total = time.time()
 
 wav_paths: list[str] = []
+prev_wav: np.ndarray | None = None   # audio from the previous segment
+prev_sr: int = 0
 
 for i, (label, text) in enumerate(segments):
-    max_tok = tokens_for_text(text)
+    is_first = (i == 0)
+    overlap_tok = tokens_for_overlap(OVERLAP_S) if not is_first else 0
+    max_tok = tokens_for_text(text) + overlap_tok
+    max_tok = min(max_tok, TOKEN_MAX)
+
     log.info(f"[{i+1}/{len(segments)}] Segment '{label}'  ({len(text)} chars  max_new_tokens={max_tok})")
     log.debug(f"  Text: {text!r}")
     t0 = time.time()
 
+    if is_first:
+        # No previous audio yet — use the anchor x_vector prompt.
+        prompt = voice_prompt
+        log.debug("  Using anchor x_vector prompt (first segment)")
+    else:
+        # Build ICL prompt from the tail of the previous segment.
+        tail_n = int(prev_sr * OVERLAP_S)
+        tail_wav = prev_wav[-tail_n:] if len(prev_wav) >= tail_n else prev_wav
+        # Approximate tail transcript: last portion of previous text scaled by overlap ratio.
+        tail_chars = int(len(prev_text) * (OVERLAP_S / (len(prev_wav) / prev_sr)))
+        tail_chars = max(20, min(tail_chars, len(prev_text)))
+        tail_text = prev_text[-tail_chars:]
+        log.debug(f"  Building ICL prompt from {len(tail_wav)/prev_sr:.2f}s tail  tail_text: {tail_text!r}")
+        prompt = model.create_voice_clone_prompt(
+            ref_audio=(tail_wav, prev_sr),
+            ref_text=tail_text,
+            x_vector_only_mode=False,
+        )
+
     wavs, sr = model.generate_voice_clone(
         text=text,
         language="english",
-        voice_clone_prompt=voice_prompt,
+        voice_clone_prompt=prompt,
         max_new_tokens=max_tok,
     )
     wav = wavs[0].astype(np.float32)
+
+    if not is_first:
+        # Trim the re-generated overlap from the front of the output.
+        pre_trim = len(wav)
+        wav = trim_overlap(wav, sr, OVERLAP_S)
+        log.debug(f"  Trimmed {pre_trim - len(wav)} samples ({OVERLAP_S}s overlap) from output start")
+
     elapsed = time.time() - t0
     duration = len(wav) / sr
     rtf = elapsed / duration if duration > 0 else 0
@@ -263,6 +318,11 @@ for i, (label, text) in enumerate(segments):
     if cuda_ok:
         mem = torch.cuda.memory_allocated() / 1024**3
         log.debug(f"  VRAM allocated: {mem:.2f} GB")
+
+    # Store for next iteration
+    prev_wav  = wavs[0].astype(np.float32)  # untrimmed — tail is taken from full output
+    prev_sr   = sr
+    prev_text = text
 
 total_elapsed = time.time() - t_total
 total_audio = sum(sf.info(p).duration for p in wav_paths)
