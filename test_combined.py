@@ -81,17 +81,18 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 ANCHOR_PATH = os.path.join(SCRIPT_DIR, "host_anchor.wav")
-ANCHOR_TEXT = "Hello and welcome. I'm so glad you're here to learn with me today!"
+ANCHOR_TEXT = "Hello and welcome. I'm delighted to have you here — let's get started."
 
 VOICE_INSTRUCT = (
-    "Female British English presenter. Young adult to middle-aged. "
-    "Bright, clear vocal texture with highly articulate and distinct pronunciation. "
-    "Pitch sits in a low-to-mid female range with significant upward inflections for "
-    "emphasis and excitement. Fast-paced delivery with deliberate dramatic pauses. "
-    "Loud and projecting volume that increases notably during praise and announcements. "
-    "Very fluent — no hesitations. Enthusiastic and excited emotion, especially when "
-    "complimenting the listener. Upbeat, authoritative, and performative tone. "
-    "Confident, extroverted, and engaging personality."
+    "Female British English instructor. Middle-aged, approximately 45 to 55 years old. "
+    "Warm, rich, and slightly deeper female voice with a composed, measured delivery. "
+    "Highly articulate and distinct pronunciation with a refined British accent. "
+    "Moderately paced — deliberate and clear, never rushed, with natural pauses for emphasis. "
+    "Enthusiastic and encouraging but in a calm, assured way — the warmth of a seasoned teacher "
+    "who genuinely enjoys the subject, not a high-energy presenter. "
+    "Steady volume with gentle lifts on key concepts and words of encouragement. "
+    "Very fluent, no hesitations. Authoritative yet approachable tone. "
+    "Mature, confident, and intellectually engaging personality."
 )
 
 # ---------------------------------------------------------------------------
@@ -154,12 +155,14 @@ if cuda_ok:
     mem = torch.cuda.memory_allocated() / 1024**3
     log.debug(f"  VRAM allocated: {mem:.2f} GB")
 
-log.info("Pre-computing voice clone prompt (full ICL, x_vector_only=False)...")
+# x_vector_only=True: encodes only the speaker embedding — no ICL speech tokens.
+# This prompt is built once and reused for every segment, avoiding the per-segment
+# ref-audio re-encoding cost of full ICL mode.
+log.info("Pre-computing voice clone prompt (x_vector_only=True)...")
 t0 = time.time()
 voice_prompt = model.create_voice_clone_prompt(
     ref_audio=(anchor_wav, anchor_sr),
-    ref_text=ANCHOR_TEXT,
-    x_vector_only_mode=False,
+    x_vector_only_mode=True,
 )
 log.info(f"Voice prompt cached in {time.time()-t0:.2f}s")
 
@@ -168,39 +171,42 @@ log.info(f"Voice prompt cached in {time.time()-t0:.2f}s")
 # ---------------------------------------------------------------------------
 
 INTRO = (
-    "Welcome to PinnLab! Today we're diving into two fascinating languages — "
-    "Japanese and Mandarin Chinese. Get ready to learn!"
+    "Welcome to PinnLab. Today we're exploring one of the most elegant principles in all of physics — "
+    "the law of conservation of energy. I think you'll find it quite beautiful."
 )
 OUTRO = (
-    "Amazing work! You've just taken your first steps into Japanese and Mandarin. "
-    "Keep practising — every word brings you closer to fluency!"
+    "Well done. You've covered the core idea and seen it applied across several real-world contexts. "
+    "Keep reflecting on these examples — they'll deepen your understanding every time. See you in the next lesson."
 )
 
 segments: list[tuple[str, str]] = [
-    ("intro",  INTRO),
-    ("scene_0", "The law of conservation of energy states that energy cannot be created or destroyed, only transformed from one form to another."),
-    ("scene_1", "Think about it this way: when you drop a ball from a height, the potential energy converts into kinetic energy as it falls."),
-    ("scene_2", "When it hits the ground, that energy transforms into sound and heat. But the total amount of energy stays exactly the same!"),
-    ("scene_3", "This principle applies everywhere — from the chemical energy in your breakfast to the nuclear reactions in the sun. Energy is always conserved."),
-    ("outro",  OUTRO),
+    ("intro",   INTRO),
+    ("scene_0", "The law of conservation of energy states that energy cannot be created or destroyed — only transformed from one form to another."),
+    ("scene_1", "Consider a ball dropped from a height. At the top, it holds potential energy. As it falls, that potential energy converts into kinetic energy — the energy of motion."),
+    ("scene_2", "When the ball strikes the ground, that kinetic energy doesn't vanish. It transforms into sound and heat. The total, at every point, remains exactly the same."),
+    ("scene_3", "This principle operates everywhere — from the chemical energy in your breakfast becoming the mechanical energy that moves your muscles, to the nuclear reactions in our sun radiating light and warmth across the solar system."),
+    ("outro",   OUTRO),
 ]
 
 # ---------------------------------------------------------------------------
-# Step 4 — Sequential generation with ICL chaining
+# Step 4 — Sequential generation
 #
-# Each segment is generated one at a time. After the first, the tail of the
-# previous segment's audio is fed back as the new ref_audio so the model
-# inherits prosodic state (pitch, pace, energy) from the segment before it.
-# This eliminates the voice-drift seam heard with independent generations.
+# x_vector prompt is reused for every segment (no re-encoding).
+# max_new_tokens is capped per segment based on text length so short segments
+# don't burn the full 2048-token budget waiting for an EOS that never comes.
+# Approx 12 codec tokens/s × estimated speech rate of ~14 chars/s → ~0.86 tok/char.
+# We add a 50% headroom buffer and clamp to [256, 2048].
 # ---------------------------------------------------------------------------
 
-CHAIN_TAIL_S = 2.5   # seconds of previous segment to feed as new ref_audio
-SAMPLE_RATE  = anchor_sr
+TOKENS_PER_CHAR = 0.86
+TOKEN_HEADROOM   = 1.5
+TOKEN_MIN        = 256
+TOKEN_MAX        = 2048
 
 
-def tail_audio(wav: np.ndarray, sr: int, seconds: float) -> np.ndarray:
-    n = int(sr * seconds)
-    return wav[-n:] if len(wav) >= n else wav
+def tokens_for_text(text: str) -> int:
+    estimate = int(len(text) * TOKENS_PER_CHAR * TOKEN_HEADROOM)
+    return max(TOKEN_MIN, min(TOKEN_MAX, estimate))
 
 
 def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
@@ -221,22 +227,22 @@ def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
     log.debug(f"  FFmpeg exit code: {result.returncode}")
 
 
-log.info(f"Starting sequential generation — {len(segments)} segments")
-log.info(f"ICL chain tail: {CHAIN_TAIL_S}s of previous segment fed as ref for next")
+log.info(f"Starting generation — {len(segments)} segments  (x_vector prompt, scaled max_new_tokens)")
 t_total = time.time()
 
 wav_paths: list[str] = []
-current_prompt = voice_prompt
 
 for i, (label, text) in enumerate(segments):
-    log.info(f"[{i+1}/{len(segments)}] Segment '{label}'  ({len(text)} chars)")
+    max_tok = tokens_for_text(text)
+    log.info(f"[{i+1}/{len(segments)}] Segment '{label}'  ({len(text)} chars  max_new_tokens={max_tok})")
     log.debug(f"  Text: {text!r}")
     t0 = time.time()
 
     wavs, sr = model.generate_voice_clone(
         text=text,
         language="english",
-        voice_clone_prompt=current_prompt,
+        voice_clone_prompt=voice_prompt,
+        max_new_tokens=max_tok,
     )
     wav = wavs[0].astype(np.float32)
     elapsed = time.time() - t0
@@ -251,16 +257,6 @@ for i, (label, text) in enumerate(segments):
     if cuda_ok:
         mem = torch.cuda.memory_allocated() / 1024**3
         log.debug(f"  VRAM allocated: {mem:.2f} GB")
-
-    # Chain: feed tail of this segment as ref_audio for the next
-    ref_tail = tail_audio(wav, sr, CHAIN_TAIL_S)
-    tail_text = text[-120:]
-    log.debug(f"  Building chain prompt from {len(ref_tail)/sr:.2f}s tail  ref_text tail: {tail_text!r}")
-    current_prompt = model.create_voice_clone_prompt(
-        ref_audio=(ref_tail, sr),
-        ref_text=tail_text,
-        x_vector_only_mode=False,
-    )
 
 total_elapsed = time.time() - t_total
 total_audio = sum(sf.info(p).duration for p in wav_paths)
