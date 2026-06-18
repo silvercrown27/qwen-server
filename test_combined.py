@@ -77,32 +77,74 @@ except Exception:
     log.info("flash-attn not found — using sdpa")
 
 # ---------------------------------------------------------------------------
-# Voice design config
+# Voice config
 # ---------------------------------------------------------------------------
 
-ANCHOR_PATH = os.path.join(SCRIPT_DIR, "host_anchor.wav")
-ANCHOR_TEXT = (
-    "Good morning, everyone. Before we begin, I want you to know that the concepts "
-    "we cover today will fundamentally change how you see the world around you. "
-    "I have been teaching this for over twenty years, and it still fascinates me."
-)
+VOICES_DIR = os.path.join(SCRIPT_DIR, "voices")
+os.makedirs(VOICES_DIR, exist_ok=True)
 
-VOICE_INSTRUCT = (
-    "A 52-year-old British female university professor with over two decades of teaching experience. "
-    "Her voice is deep for a woman — a low contralto, with strong chest resonance and no breathiness. "
-    "Fundamental frequency around 165 to 180 Hz, noticeably lower than a young woman's voice. "
-    "Her pitch range is moderate — she uses expressive upward inflections on key words and moments of "
-    "excitement, but always returns to a low, grounded baseline. "
-    "Pace is slow and deliberate — around 110 words per minute. She never rushes. "
-    "She takes natural breath pauses between clauses and allows each idea to land fully before moving on. "
-    "Longer pauses after key concepts give the listener time to absorb what was just said. "
-    "Articulation is precise and crisp — received pronunciation British English. "
-    "Her enthusiasm is vivid and infectious — she genuinely loves the subject and lets it show, "
-    "leaning into exciting ideas with increased energy and a brighter tone, like a professor who "
-    "still gets a spark of joy every time she explains a concept she finds beautiful. "
-    "Statements end with falling intonation — no upspeak, no vocal fry. "
-    "Her personality is warm, intellectually passionate, authoritative, and deeply engaging."
-)
+# Set VOICE_ID to switch between voices. Each voice has its own design anchor
+# (generated once by VoiceDesign model) and settled clone anchor (saved from
+# the outro of the first successful generation run).
+VOICE_ID = "host_sample_02"   # ← change to "host_sample_01" to switch back
+
+VOICE_CONFIGS = {
+    "host_sample_01": {
+        "anchor_text": (
+            "Good morning, everyone. Before we begin, I want you to know that the concepts "
+            "we cover today will fundamentally change how you see the world around you. "
+            "I have been teaching this for over twenty years, and it still fascinates me."
+        ),
+        "instruct": (
+            "A 52-year-old British female university professor with over two decades of teaching experience. "
+            "Her voice is deep for a woman — a low contralto, with strong chest resonance and no breathiness. "
+            "Fundamental frequency around 165 to 180 Hz, noticeably lower than a young woman's voice. "
+            "Her pitch range is moderate — she uses expressive upward inflections on key words and moments of "
+            "excitement, but always returns to a low, grounded baseline. "
+            "Pace is slow and deliberate — around 110 words per minute. She never rushes. "
+            "She takes natural breath pauses between clauses and allows each idea to land fully before moving on. "
+            "Longer pauses after key concepts give the listener time to absorb what was just said. "
+            "Articulation is precise and crisp — received pronunciation British English. "
+            "Her enthusiasm is vivid and infectious — she genuinely loves the subject and lets it show, "
+            "leaning into exciting ideas with increased energy and a brighter tone, like a professor who "
+            "still gets a spark of joy every time she explains a concept she finds beautiful. "
+            "Statements end with falling intonation — no upspeak, no vocal fry. "
+            "Her personality is warm, intellectually passionate, authoritative, and deeply engaging."
+        ),
+    },
+    "host_sample_02": {
+        "anchor_text": (
+            "Hello everyone, and welcome. It is wonderful to have you here today. "
+            "What we are about to explore together is genuinely fascinating, "
+            "and I am very much looking forward to sharing it with you."
+        ),
+        "instruct": (
+            "A 58-year-old British female broadcaster and educator, warm and highly experienced. "
+            "Her voice is smooth and velvety — a rich mezzo-soprano with natural warmth and depth. "
+            "Fundamental frequency around 185 to 200 Hz, mature and full but not heavy. "
+            "Her tone is honeyed and fluid — there is a natural musicality to her speech, "
+            "with gentle melodic rises on interesting ideas that feel effortless and unhurried. "
+            "Pace is relaxed and comfortable — around 105 words per minute. "
+            "She breathes naturally between thoughts, never cramming words together. "
+            "Pauses are generous and confident — she is never in a hurry. "
+            "Her enthusiasm is expressed through warmth and brightness rather than energy spikes — "
+            "she sounds like someone who genuinely delights in sharing knowledge, smiling as she speaks. "
+            "Received pronunciation British English, beautifully articulated but never stiff. "
+            "No upspeak, no vocal fry. Statements resolve with warm falling intonation. "
+            "Her personality is gracious, intelligent, nurturing, and quietly captivating."
+        ),
+    },
+}
+
+voice_cfg    = VOICE_CONFIGS[VOICE_ID]
+ANCHOR_TEXT  = voice_cfg["anchor_text"]
+VOICE_INSTRUCT = voice_cfg["instruct"]
+ANCHOR_PATH  = os.path.join(VOICES_DIR, f"{VOICE_ID}_design.wav")
+VOICE_ANCHOR_PATH_OVERRIDE = os.path.join(VOICES_DIR, f"{VOICE_ID}.wav")
+
+log.info(f"Active voice: {VOICE_ID}")
+log.info(f"  Design anchor : {ANCHOR_PATH}")
+log.info(f"  Clone anchor  : {VOICE_ANCHOR_PATH_OVERRIDE}")
 
 # ---------------------------------------------------------------------------
 # Step 1 — Generate anchor with VoiceDesign model (cached after first run)
@@ -140,7 +182,7 @@ else:
     anchor_wav = wavs[0].astype(np.float32)
     log.info(f"  Generated {len(anchor_wav)/anchor_sr:.2f}s audio in {time.time()-t_gen:.1f}s  @ {anchor_sr} Hz")
     sf.write(ANCHOR_PATH, anchor_wav, anchor_sr)
-    log.info(f"  Saved anchor: {ANCHOR_PATH}")
+    log.info(f"  Saved design anchor: {ANCHOR_PATH}")
     del vd_model
     torch.cuda.empty_cache()
     if cuda_ok:
@@ -207,7 +249,7 @@ TOKEN_HEADROOM     = 1.5
 TOKEN_MIN          = 256
 TOKEN_MAX          = 2048
 
-VOICE_ANCHOR_PATH  = os.path.join(SCRIPT_DIR, "voice_anchor.wav")
+VOICE_ANCHOR_PATH  = VOICE_ANCHOR_PATH_OVERRIDE
 OUTRO_TEXT         = segments[-1][1]
 
 
