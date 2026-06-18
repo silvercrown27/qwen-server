@@ -214,6 +214,36 @@ def tokens_for_text(text: str) -> int:
     return max(TOKEN_MIN, min(TOKEN_MAX, estimate))
 
 
+CODEC_HZ   = 12          # speech tokenizer frame rate
+FADE_MS    = 30          # fade-in/out applied to ref audio edges
+
+
+def prepare_ref_audio(wav: np.ndarray, sr: int) -> np.ndarray:
+    """Trim to codec frame boundary and apply edge fades to eliminate static.
+
+    The codec tokenizer runs at CODEC_HZ. Any samples beyond the last complete
+    frame produce a malformed partial token which decodes as static noise.
+    Trimming to the nearest frame boundary and fading the edges prevents this.
+    """
+    # Trim to nearest complete codec frame
+    frame_samples = sr // CODEC_HZ
+    n_frames = len(wav) // frame_samples
+    trimmed = wav[:n_frames * frame_samples]
+
+    # Short linear fade-in and fade-out to avoid onset/offset clicks
+    fade_n = int(sr * FADE_MS / 1000)
+    fade_n = min(fade_n, len(trimmed) // 4)
+    if fade_n > 0:
+        trimmed = trimmed.copy()
+        trimmed[:fade_n]  *= np.linspace(0.0, 1.0, fade_n, dtype=np.float32)
+        trimmed[-fade_n:] *= np.linspace(1.0, 0.0, fade_n, dtype=np.float32)
+
+    removed = len(wav) - len(trimmed)
+    log.debug(f"  prepare_ref_audio: {len(wav)} → {len(trimmed)} samples  "
+              f"(trimmed {removed}, fade {fade_n} samples each end)")
+    return trimmed
+
+
 def ffmpeg_concat(wav_paths: list[str], output_path: str) -> None:
     concat_list = output_path.replace(".wav", "_concat.txt")
     with open(concat_list, "w") as f:
@@ -243,6 +273,9 @@ else:
     log.info("voice_anchor.wav will be created from the outro of this run.")
     ref_wav, ref_sr = anchor_wav, anchor_sr
     ref_text = ANCHOR_TEXT
+
+ref_wav = prepare_ref_audio(ref_wav, ref_sr)
+log.info(f"  Ref audio prepared: {len(ref_wav)/ref_sr:.2f}s (frame-aligned, faded)")
 
 log.info("Building ICL voice clone prompt (x_vector_only=False)...")
 t0 = time.time()
