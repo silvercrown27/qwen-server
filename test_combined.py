@@ -86,7 +86,7 @@ os.makedirs(VOICES_DIR, exist_ok=True)
 # Set VOICE_ID to switch between voices. Each voice has its own design anchor
 # (generated once by VoiceDesign model) and settled clone anchor (saved from
 # the outro of the first successful generation run).
-VOICE_ID = "host_sample_02"   # ← change to "host_sample_01" to switch back
+VOICE_ID = "host_sample_03"   # ← change to "host_sample_01" or "host_sample_02" to switch
 
 VOICE_CONFIGS = {
     "host_sample_01": {
@@ -132,6 +132,29 @@ VOICE_CONFIGS = {
             "Received pronunciation British English, impeccably articulated but completely natural. "
             "No upspeak, no vocal fry, no rising terminals. Every statement lands with quiet finality. "
             "Her personality is deeply knowledgeable, serene, warmly authoritative, and compelling."
+        ),
+    },
+    "host_sample_03": {
+        "anchor_text": (
+            "Good morning! I have to say, I am genuinely excited about what we are covering today. "
+            "After all these years, this particular subject still gives me a real thrill — "
+            "and I am absolutely certain it will do the same for you."
+        ),
+        "instruct": (
+            "A 61-year-old British female professor and science communicator with boundless passion for her field. "
+            "Her voice is a deep, full contralto — fundamental frequency around 158 to 172 Hz — "
+            "with strong chest resonance, rounded vowels, and zero breathiness. "
+            "It is unmistakably an older woman's voice: settled, rich, and carrying natural gravitas. "
+            "But unlike a reserved academic, she wears her enthusiasm openly. "
+            "Her energy is warm and radiant — she lights up on fascinating ideas, her pitch rising "
+            "expressively on key words and moments of discovery before returning to a deep, grounded baseline. "
+            "She sounds like a professor who has never lost her sense of wonder after forty years. "
+            "Pace is measured and listener-friendly — around 105 words per minute — with natural breath "
+            "pauses between clauses that feel like she is letting you savour each point. "
+            "She never rushes, but the energy in her voice makes every sentence feel alive. "
+            "Received pronunciation British English, crisp and confident. "
+            "No upspeak, no vocal fry. Statements resolve with warm, falling finality. "
+            "Her personality is joyful, deeply knowledgeable, magnetic, and infectiously enthusiastic."
         ),
     },
 }
