@@ -71,6 +71,32 @@ actually chunks real content: each chunk is one narrated beat, roughly
 10-20s of speech, matching Part.duration guidance from this codebase's own
 video-authoring instructions.
 
+  4. LEAKED REFERENCE-AUDIO FRAGMENT (confirmed from a real GPU run of this
+     script, added after point 2's "merge overlap" theory was tested and
+     ruled out — merge duration math came back exact, zero discrepancy, in
+     both runs). What was actually reported — chunk_01 (pure Japanese,
+     "こんにちは。予約しています。") sounding like it starts with a
+     leading English "s"/"is" sound — is a real bug in the qwen_tts PACKAGE
+     itself (version 0.1.1, not this codebase): generate_voice_clone()'s
+     ICL trim computes the reference/generated boundary via a proportional
+     ratio (ref codec-token count / total codec-token count, scaled onto
+     decoded sample count) instead of an exact per-token sample mapping.
+     That ratio can land short, leaving a trailing fragment of the
+     REFERENCE clip's own speech (Celeste's ref_text ends "...many years")
+     stitched onto the front of the output. Confirmed against the actual
+     generated chunk_01.wav from both GPU runs: a short ~90-100ms energy
+     burst, then a genuine ~60-80ms silence gap, THEN the real "konnichiwa"
+     onset — two concatenated acoustic events, not one natural utterance
+     start. Most audible on SHORT chunks, since a fixed ~100ms leak is a
+     much larger fraction of a 2-3s clip than a 10s+ one — exactly matching
+     why this was noticed on the short Japanese-only lines specifically.
+     WORKAROUND (applied in this script, see strip_leading_reference_leak):
+     detects a burst -> silence-gap -> re-onset pattern in the first 300ms
+     of every generated chunk and trims past it, independent of whatever
+     cut point the library itself already applied. Conservative by design —
+     only acts when an actual silence gap is found, so it won't clip a
+     legitimate utterance that starts on a soft consonant.
+
 Run (GPU instance, same venv as qwen-server):
     cd qwen-server && source venv/bin/activate
     python test_hotel_scenario_final.py
@@ -144,6 +170,83 @@ def pad_audio(wav: np.ndarray, sr: int, pad_seconds: float = AUDIO_PAD_SECONDS) 
     every generated chunk before merging."""
     silence = np.zeros(int(sr * pad_seconds), dtype=wav.dtype)
     return np.concatenate([silence, wav, silence])
+
+
+# ---------------------------------------------------------------------------
+# WORKAROUND for a confirmed qwen_tts library bug (package version 0.1.1,
+# NOT this codebase): generate_voice_clone()'s ICL trim
+# (qwen3_tts_model.py's generate_voice_clone, the `cut = int(ref_len /
+# total_len * wav.shape[0])` line) computes where the reference audio ends
+# and the newly-generated speech begins using a PROPORTIONAL estimate
+# (ref codec-token count / total codec-token count, scaled onto the decoded
+# sample count) rather than an exact per-token sample boundary. That ratio
+# assumes uniform samples-per-token across both the reference and generated
+# segments; in practice it lands short often enough to leave a trailing
+# fragment of the REFERENCE clip's own speech stitched onto the front of
+# the returned waveform. CONFIRMED against real output: Celeste's ICL
+# ref_text ends in "...many years", and chunk_01 (pure Japanese,
+# "こんにちは。予約しています。") in both GPU test runs shows a short
+# ~90-100ms energy burst, then a genuine ~60-80ms silence gap, THEN the
+# real "konnichiwa" onset — i.e. two concatenated acoustic events, not one
+# natural utterance start. That leaked fragment is what read as an English
+# "is"/"-s" sound stitched onto the front of the Japanese phrase. This is
+# most audible on SHORT chunks (a fixed ~100ms leak is a much larger
+# fraction of a 2-3s clip than a 10s+ one) — exactly matching the reported
+# symptom being isolated to the short Japanese-only lines.
+#
+# This trims any leading fragment-then-silence-gap pattern BEFORE the real
+# utterance's sustained onset, independent of (in addition to, not instead
+# of) the library's own already-applied cut. It's conservative by design:
+# it only acts when it finds an actual RMS-defined silence gap very close
+# to the start of the clip, so a real utterance that legitimately begins
+# with a soft consonant (no true gap right after it) is left untouched.
+LEAK_SCAN_WINDOW_S = 0.30       # only look for the leak pattern within this leading window
+LEAK_FRAME_S = 0.02             # analysis frame size
+LEAK_SILENCE_RMS = 0.003        # frame RMS below this counts as "silence" for gap detection
+LEAK_MIN_GAP_S = 0.04           # minimum silent-frame run to count as a real gap (not just a dip)
+
+
+def strip_leading_reference_leak(wav: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
+    """Returns (possibly-trimmed wav, seconds trimmed). No-op unless a clear
+    burst -> silence-gap -> re-onset pattern is found within the first
+    LEAK_SCAN_WINDOW_S of the clip."""
+    frame_n = int(sr * LEAK_FRAME_S)
+    scan_frames = int(LEAK_SCAN_WINDOW_S / LEAK_FRAME_S)
+    min_gap_frames = max(1, int(LEAK_MIN_GAP_S / LEAK_FRAME_S))
+
+    frame_rms = []
+    for i in range(scan_frames):
+        seg = wav[i * frame_n:(i + 1) * frame_n]
+        if len(seg) == 0:
+            break
+        frame_rms.append(float(np.sqrt(np.mean(seg.astype(np.float64) ** 2))))
+
+    # Find the first run of >= min_gap_frames consecutive silent frames that
+    # is preceded by at least one non-silent frame (a burst) and followed by
+    # a return to non-silent frames (the real onset) — i.e. burst, gap,
+    # re-onset, all within the scan window.
+    i = 0
+    while i < len(frame_rms):
+        if frame_rms[i] > LEAK_SILENCE_RMS:
+            # found a leading burst — look for a silence run right after it
+            j = i + 1
+            while j < len(frame_rms) and frame_rms[j] > LEAK_SILENCE_RMS:
+                j += 1
+            gap_start = j
+            while j < len(frame_rms) and frame_rms[j] <= LEAK_SILENCE_RMS:
+                j += 1
+            gap_len = j - gap_start
+            if gap_len >= min_gap_frames and j < len(frame_rms):
+                # burst [i:gap_start), gap [gap_start:j) confirmed, and real
+                # content resumes at frame j — trim everything before it.
+                cut_sample = j * frame_n
+                return wav[cut_sample:], cut_sample / sr
+            # burst wasn't followed by a real gap — not the leak pattern,
+            # stop scanning (treat frame i as the legitimate utterance start)
+            break
+        i += 1
+
+    return wav, 0.0
 
 
 def tokens_for_text(text: str) -> int:
@@ -310,19 +413,27 @@ def run_variant(model, clone_prompt, run_name: str, lang_overrides: dict[str, st
         gen_elapsed = time.time() - t0
         raw_duration = len(raw_wav) / sr
 
-        padded_wav = pad_audio(raw_wav, sr)
+        # Workaround for the qwen_tts library's proportional ICL trim
+        # sometimes leaving a leaked fragment of the reference clip's own
+        # speech at the front — see strip_leading_reference_leak's docstring.
+        clean_wav, leaked_s = strip_leading_reference_leak(raw_wav, sr)
+        clean_duration = len(clean_wav) / sr
+
+        padded_wav = pad_audio(clean_wav, sr)
         padded_duration = len(padded_wav) / sr
 
         path = os.path.join(run_dir, f"{chunk_id}.wav")
         sf.write(path, padded_wav, sr)
         raw_paths.append(path)
 
+        leak_note = f"  LEAK STRIPPED: {leaked_s*1000:.0f}ms" if leaked_s > 0 else ""
         log.info(f"  {chunk_id}  lang={lang:<10} raw={raw_duration:.2f}s  "
-                  f"padded={padded_duration:.2f}s  gen={gen_elapsed:.1f}s  text={text[:50]!r}")
+                  f"padded={padded_duration:.2f}s  gen={gen_elapsed:.1f}s  "
+                  f"text={text[:50]!r}{leak_note}")
         per_chunk.append({
             "chunk_id": chunk_id, "lang": lang, "text": text,
             "raw_duration": raw_duration, "padded_duration": padded_duration,
-            "sr": sr,
+            "sr": sr, "leaked_s": leaked_s,
         })
 
     log.info(f"  Run '{run_name}' generation total: {time.time()-t_run:.1f}s")
@@ -417,6 +528,41 @@ def print_final_report(results: list[dict]):
               "no '[sigh]' as a distinct audio insertion) — do not rely on that as a feature; "
               "any perceived laugh/sigh is the model's own prosody interpretation of the "
               "surrounding text, not a controllable discrete event.")
+
+    log.info("\n[4] LEAKED REFERENCE-AUDIO FRAGMENT CHECK:")
+    log.info("  CONFIRMED BUG (qwen_tts package, not this codebase): generate_voice_clone()'s "
+              "ICL trim uses a proportional ref_len/total_len ratio to find where the "
+              "reference clip ends and real generated speech begins, and that ratio can land "
+              "short — leaving a trailing fragment of the REFERENCE clip's own speech "
+              "(Celeste's ref_text ends '...many years') stitched onto the front of the "
+              "output. Most audible on SHORT chunks (a fixed ~100ms leak is a much bigger "
+              "fraction of a 2-3s clip than a 10s+ one) — this is almost certainly the "
+              "'starts with an s/is sound before the real word' symptom reported on "
+              "chunk_01's pure-Japanese 'こんにちは' line.")
+    any_leak = False
+    for r in results:
+        leaked_chunks = [c for c in r["per_chunk"] if c["leaked_s"] > 0]
+        if leaked_chunks:
+            any_leak = True
+            log.info(f"  {r['run_name']}: leak detected & auto-stripped on "
+                      f"{len(leaked_chunks)} chunk(s):")
+            for c in leaked_chunks:
+                log.info(f"    {c['chunk_id']}: stripped {c['leaked_s']*1000:.0f}ms  "
+                          f"({c['text'][:50]!r})")
+        else:
+            log.info(f"  {r['run_name']}: no leak pattern detected by the heuristic in any chunk.")
+    if any_leak:
+        log.info("  >>> This run's WAV files already have the leak removed (see "
+                  "strip_leading_reference_leak — applied to every chunk before padding/"
+                  "merge). Compare a chunk_01.wav from an OLDER run (before this fix) against "
+                  "this run's chunk_01.wav to confirm the fragment is gone.")
+    else:
+        log.info("  >>> No leak detected THIS run by the heuristic (LEAK_SILENCE_RMS/"
+                  "LEAK_MIN_GAP_S thresholds in this script) — if you still hear a leading "
+                  "artifact after this fix, the leak's silence gap may be shorter/quieter "
+                  "than the heuristic's thresholds catch; tighten LEAK_SILENCE_RMS or "
+                  "LEAK_MIN_GAP_S and re-run, or report the specific chunk so the thresholds "
+                  "can be tuned against real data instead of guessed.")
 
     log.info("\n" + "=" * 90)
 
