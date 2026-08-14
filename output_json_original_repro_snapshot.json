@@ -1,0 +1,218 @@
+{
+  "title": "Japanese Drawing & Beginner Japanese: Sumi-e, Phrases, and Kanji",
+  "language": "en",
+  "subscription_type": null,
+  "voice_settings": null,
+  "scenes": [
+    {
+      "id": "scene-1-art",
+      "title": "The Art of Japanese Drawing",
+      "sections": [
+        {
+          "id": "sec-1",
+          "title": "Brush and Ink",
+          "parts": [
+            {
+              "id": "japanese-drawing-intro",
+              "transcript": "Japanese drawing, or sumi-e, is a graceful art form built on simple brush and ink. For centuries, artists have painted mountains, water, and mist with just a few deliberate strokes — each one a study in balance and restraint."
+            },
+            {
+              "id": "brush-and-ink-tools",
+              "transcript": "At the heart of sumi-e are three tools. The fude is a brush with a tapered bamboo handle and fine animal-hair bristles. The sumi is a solid ink stick, ground against a stone with a little water to make fresh ink."
+            },
+            {
+              "id": "brush-stroke-variety",
+              "transcript": "A single brush can make hair-thin lines or bold, sweeping bands — simply by changing pressure. Light pressure skims the paper; heavier pressure presses the full belly of the brush into the stroke."
+            }
+          ]
+        },
+        {
+          "id": "sec-2",
+          "title": "The Aesthetic of Less",
+          "parts": [
+            {
+              "id": "empty-space-wabi-sabi",
+              "transcript": "Empty space is a partner to the ink, giving the artwork breathing room. In Japanese art this silence has a name: ma. It is not absence — it is the pause that lets each stroke sing."
+            },
+            {
+              "id": "natural-subjects",
+              "transcript": "Artists love nature, especially bamboo, plum blossoms, and small birds. Bamboo bends but never breaks, plum blooms in the cold, and a bird on a twig holds a whole season in one quiet moment."
+            },
+            {
+              "id": "sumi-e-philosophy",
+              "transcript": "The goal of sumi-e is to capture the spirit of the subject, not a photographic copy. Watch how the same bird can be drawn again — looser, freer — and still feel more alive than a perfect likeness."
+            }
+          ]
+        },
+        {
+          "id": "sec-3",
+          "title": "One Brush, One Soul",
+          "parts": [
+            {
+              "id": "calligraphy-connection",
+              "transcript": "Drawing and calligraphy share the same brush, the same rhythm, and the same soul. This character, 心, pronounced kokoro, means heart — and it is painted with exactly the same energy as the art we have been making all along."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "scene-2-common-phrases",
+      "title": "Common Phrases for Beginners",
+      "sections": [
+        {
+          "id": "s2-sec-1",
+          "title": "Greetings",
+          "parts": [
+            {
+              "id": "s2-greeting-konnichiwa",
+              "transcript": "Every conversation starts with a greeting, and the most common one in Japanese is こんにちは (konnichiwa). It simply means hello, and you can use it all through the daytime with anyone you meet."
+            },
+            {
+              "id": "s2-morning-ohayou",
+              "transcript": "In the morning, before about ten or eleven o'clock, you say おはようございます (ohayou gozaimasu), which means good morning. Among close friends it often shortens to just ohayou, and everyone understands."
+            }
+          ]
+        },
+        {
+          "id": "s2-sec-2",
+          "title": "Everyday Phrases",
+          "parts": [
+            {
+              "id": "s2-thanks-arigatou",
+              "transcript": "To thank someone, say ありがとうございます (arigatou gozaimasu), which simply means thank you. You will use this phrase every single day, whether someone holds a door, shares a snack, or offers a kind word."
+            },
+            {
+              "id": "s2-sorry-sumimasen",
+              "transcript": "Now for those awkward moments, すみません (sumimasen) covers two jobs at once. It can mean excuse me when you get someone's attention, and it also means sorry after you make a small mistake."
+            },
+            {
+              "id": "s2-farewell-sayonara",
+              "transcript": "For goodbye you can say さようなら (sayonara), which is the formal farewell you hear in classrooms. Between close friends, the friendlier じゃね (ja ne) is far more common and casual."
+            },
+            {
+              "id": "s2-polite-hai-forms",
+              "transcript": "When you need a simple answer, はい (hai) means yes and いいえ (iie) means no. Both are polite and easy to say, so you can reply with confidence right away, even as a complete beginner."
+            }
+          ]
+        },
+        {
+          "id": "s2-sec-3",
+          "title": "Polite Requests and Excuses",
+          "parts": [
+            {
+              "id": "s2-please-onegaishimasu",
+              "transcript": "To ask for something politely, add おねがいします (onegaishimasu) at the end of your request. It is like saying please, and it makes even a simple request sound warm, careful, and respectful."
+            },
+            {
+              "id": "s2-excuse-me-shitsurei",
+              "transcript": "When you leave a room or interrupt politely, しつれいします (shitsurei shimasu) shows respect. It literally means excuse my rudeness, though the situation is usually perfectly polite, so think of it as a gentle formality."
+            }
+          ]
+        },
+        {
+          "id": "s2-sec-4",
+          "title": "Politeness and Practice",
+          "parts": [
+            {
+              "id": "s2-polite-inflection",
+              "transcript": "Notice the pattern: adding ございます (gozaimasu) to a phrase makes it noticeably more respectful. ありがとう becomes ありがとうございます, and the politeness of the whole sentence instantly rises. The same ending turns a casual word into something you can use with anyone."
+            },
+            {
+              "id": "s2-sentences-in-context",
+              "transcript": "Now let's put these phrases into action. おはようございます。元気ですか？ (ohayou gozaimasu, genki desu ka) means good morning, how are you. And ありがとうございます。また明日ね。 (arigatou gozaimasu, mata ashita ne) means thank you, see you tomorrow. You already know the first words of every sentence."
+            },
+            {
+              "id": "s2-practice-encouragement",
+              "transcript": "Practice these ten phrases aloud with a natural, friendly tone, and let the rhythm of each one become familiar. Repeat them often, at breakfast, on the train, before bed, and soon they will feel like second nature."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "s3-kanji",
+      "title": "Essential Kanji for Beginners",
+      "sections": [
+        {
+          "id": "s3-sec-1",
+          "title": "What Are Kanji",
+          "parts": [
+            {
+              "id": "kanji-what-are-they",
+              "transcript": "Welcome to the world of kanji. These are characters that Japan borrowed from China over a thousand years ago, and each one carries its own meaning and its own reading. Learn one, and you unlock a whole word."
+            },
+            {
+              "id": "kanji-zero",
+              "transcript": "Let's begin with a friendly one. The character 零 means zero, and it also means circle. Rei is how you say it. See the round ring beneath it? That shape holds the meaning of the word."
+            }
+          ]
+        },
+        {
+          "id": "s3-sec-2",
+          "title": "Picture Characters",
+          "parts": [
+            {
+              "id": "kanji-sun",
+              "transcript": "Next, the character 日. It means sun, or day — and if you look closely, you can glimpse the sun's shape right inside its box. The reading is hi, or nichi, depending on the word."
+            },
+            {
+              "id": "kanji-moon",
+              "transcript": "Now the character 月, meaning moon, or month. It is a tall, graceful character, and its frame hints at the curve of a crescent. Read it as tsuki, or getsu."
+            },
+            {
+              "id": "kanji-person",
+              "transcript": "The character 人 means person. Look at its two strokes — they really do look like someone walking, legs stepping forward. It reads hito, or jin."
+            },
+            {
+              "id": "kanji-water",
+              "transcript": "And here is 水, meaning water. Its strokes fall like three streams running down the page. Say it as mizu, or sui. You will see it everywhere."
+            }
+          ]
+        },
+        {
+          "id": "s3-sec-3",
+          "title": "Radicals Build Meaning",
+          "parts": [
+            {
+              "id": "kanji-combining-logic",
+              "transcript": "Here is a secret about kanji. Many of them are built from smaller pieces called radicals. Stack two or three radicals together, and a new meaning appears. Let's watch two of them pull apart."
+            },
+            {
+              "id": "kanji-tree-composite",
+              "transcript": "Take the tree radical, 木, which means tree. Put three of them together and you get 森 — the character for forest. Three trees standing close together, exactly what a forest is."
+            }
+          ]
+        },
+        {
+          "id": "s3-sec-4",
+          "title": "Kanji in Sentences",
+          "parts": [
+            {
+              "id": "sample-sentence-water",
+              "transcript": "Now let's put it all together. Mizu wo kudasai — written 水をください — means water please. The kanji 水 leads the sentence, and the hiragana that follow soften it into a polite request."
+            },
+            {
+              "id": "sample-sentence-person",
+              "transcript": "One more. Hito wa koko ni imasu — 人はここにいます — means the person is here. The kanji 人 anchors the sentence, telling us exactly who we are talking about."
+            }
+          ]
+        },
+        {
+          "id": "s3-sec-5",
+          "title": "Practice and Journey",
+          "parts": [
+            {
+              "id": "kanji-practice-tip",
+              "transcript": "The best way to make kanji your own is to write them. Practise stroke by stroke, in the correct order, top to bottom and left to right. With steady repetition, they will soon feel familiar."
+            },
+            {
+              "id": "kanji-journey-close",
+              "transcript": "Every kanji you master is a step on a rewarding journey. From 日 and 月 to 森 and beyond, each character you know brings you closer to reading this beautiful language."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
