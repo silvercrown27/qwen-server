@@ -97,13 +97,56 @@ video-authoring instructions.
      only acts when an actual silence gap is found, so it won't clip a
      legitimate utterance that starts on a soft consonant.
 
+v3 additions — informed by external research into how the wider Qwen3-TTS/
+long-form-TTS community has solved this same problem class (see chat history
+for full source list; key ones cited inline near the relevant code below):
+
+  5. REFERENCE CLIP TOO SHORT FOR EMOTION — Celeste's ICL reference was only
+     celeste_ref.wav (3s, the hard floor Alibaba's own docs allow). Both
+     Alibaba's docs (10-20s recommended) and independent community guidance
+     (5-15s "ideal", emotion specifically tied to intonation VARIETY in the
+     reference) point the same direction. Switched to the existing 14s
+     celeste.wav (already on disk, no new recording needed) with a real
+     Whisper-transcribed ref_text for the full clip. Also discovered
+     celeste_ref.wav's tail very likely ends mid-word (waveform never
+     decays to silence before the file just stops) — celeste.wav's tail, by
+     contrast, decays naturally, confirmed safe as an ICL reference boundary
+     (training itself partitions reference/target audio at word boundaries
+     per external research — a mid-word reference end is out-of-distribution).
+
+  6. LEAKED-FRAGMENT ROOT-CAUSE FIX — external research independently
+     confirmed the EXACT mechanism diagnosed earlier this session (two
+     separate community projects describe the identical symptom: a short,
+     consistent leading artifact on every ICL generation). The validated
+     fix is APPENDING SILENCE TO THE REFERENCE AUDIO BEFORE ENCODING
+     (0.5s, per andimarafioti/faster-qwen3-tts's default) — addressing the
+     cause (ICL prefill ending mid-phoneme) rather than post-hoc pattern-
+     matching the symptom in generated output. Applied in prepare_ref_audio.
+     strip_leading_reference_leak is KEPT as a secondary safety net.
+
+  7. FIXED SEED PER CHUNK — external research (Qwen3 long-form TTS
+     guidance) identifies random sampling itself as an ADDITIONAL drift
+     source, separate from reference quality: resetting to the same seed
+     before every chunk's generate_voice_clone() call removes run-to-run
+     sampling variance as a contributor. Applied via GENERATION_SEED.
+
+  8. ACCENT BLEED (open question, not yet resolved — see RUN C below) —
+     external research surfaces a DOCUMENTED TENSION with point 6's ICL
+     approach: full ICL mode's reference-audio context can bleed the
+     reference's own accent into DIFFERENT-language generated text
+     (QwenLM/Qwen3-TTS discussion #230). x_vector_only_mode=True is cited
+     as the community's fix for that specific problem, at the cost of the
+     weaker cloning fidelity already established. RUN C tests both modes
+     directly on the same real EN/JP mixed-script content rather than
+     picking one from documentation alone.
+
 Run (GPU instance, same venv as qwen-server):
     cd qwen-server && source venv/bin/activate
     python test_hotel_scenario_final.py
 
-Output: hotel_test_out/{run_a_auto,run_b_explicit_lang}/chunk_NN.wav, one
-merged file per run, and a printed diagnostics report covering all three
-symptoms above.
+Output: hotel_test_out/{run_a_chunked_boundary,run_b_mixed_script_icl,
+run_c_mixed_script_xvec}/*.wav, one merged file per run, and a printed
+diagnostics report covering all eight findings above.
 """
 import os
 os.environ.setdefault("ORT_LOGGING_LEVEL", "3")
@@ -128,14 +171,65 @@ os.makedirs(OUT_DIR, exist_ok=True)
 BASE_LOCAL = os.path.join(SCRIPT_DIR, "Qwen3-TTS-12Hz-1.7B-Base")
 BASE_HF_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
+# ---------------------------------------------------------------------------
+# REFERENCE CLIP — switched from celeste_ref.wav (3s) to the full celeste.wav
+# (14s), per external research into this exact problem class:
+#   - Alibaba's own Qwen3-TTS API docs recommend 10-20s of reference audio
+#     (hard floor 3s, which is what celeste_ref.wav sat at — the weakest
+#     allowed length, not a deliberately chosen good one).
+#   - Community guidance (multiple independent Qwen3-TTS wrapper projects)
+#     converges on 5-15s as the practical sweet spot, and specifically
+#     flags that EMOTIONAL RANGE in the clone comes from varied intonation
+#     across the reference clip — a 3s clip has almost no room for pitch/
+#     energy variation, which plausibly explains flattened emotion beyond
+#     just the leaked-fragment artifact.
+#   - celeste_ref.wav's tail was independently confirmed (waveform
+#     inspection) to end at HIGH, non-decaying energy (rms 0.04-0.13, no
+#     silence before the file just stops) — i.e. very likely cut mid-word,
+#     not at a natural pause. celeste.wav's tail, by contrast, decays
+#     naturally to genuine silence over its final ~300ms — a real
+#     completed utterance, safe to use as an ICL reference boundary.
+#     (External research also confirms training itself partitions
+#     reference/target audio at WORD boundaries — an ICL reference that
+#     ends mid-word is out-of-distribution for how the model was trained.)
 CELESTE_REF_WAV = os.path.join(
-    SCRIPT_DIR, "..", "pinn-research-model", "scene", "voices", "celeste_ref.wav"
+    SCRIPT_DIR, "..", "pinn-research-model", "scene", "voices", "celeste.wav"
 )
-CELESTE_REF_TEXT = "Good evening. I have spent many years"
+# Full-clip transcript, Whisper-transcribed (openai-whisper "small" model,
+# language="en") against the actual 14s celeste.wav — matches how
+# celeste_ref.wav's original 3s transcript was produced (per
+# scene/qwen_voice.py's comment: "Whisper-transcribed"), just run against
+# the full clip instead of the short trim.
+CELESTE_REF_TEXT = (
+    "Good evening. I have spent many years exploring this subject, and what "
+    "continues to move me is how much of it still surprises me. I hope that "
+    "by the end of today, it surprises you too."
+)
 
 # Mirrors audio_manager.AUDIO_PAD_SECONDS / _pad_audio_file exactly, so the
 # padded-duration math in this script matches production's real behavior.
 AUDIO_PAD_SECONDS = 0.1
+
+# ---------------------------------------------------------------------------
+# TRAILING SILENCE APPENDED TO THE REFERENCE CLIP BEFORE ENCODING — this is
+# the actual, externally-validated fix for the leaked-fragment artifact this
+# script's strip_leading_reference_leak() was built to detect/patch AFTER
+# the fact. Independently confirmed by a separate Qwen3-TTS inference
+# project (andimarafioti/faster-qwen3-tts): "the ICL voice-cloning prompt
+# ends with the last codec token of the reference audio, so the model's
+# first generated token is conditioned on whatever phoneme the reference
+# ends with. Appending a short silence makes the last tokens encode silence
+# instead, preventing that phoneme from bleeding into the start of the
+# generated speech." That project's default is 0.5s, applied to the
+# reference audio ITSELF before create_voice_clone_prompt() ever sees it —
+# not a post-hoc trim of the model's output. This is a strictly better fix
+# than strip_leading_reference_leak: it addresses the cause (an ICL prefill
+# that ends mid-phoneme) rather than pattern-matching the symptom in the
+# output waveform, so it isn't dependent on tuning RMS/ratio thresholds
+# against specific examples. strip_leading_reference_leak is KEPT as a
+# second, independent safety net (belt-and-suspenders) rather than removed,
+# since it costs nothing when it finds nothing to trim.
+REF_TRAILING_SILENCE_S = 0.5
 
 
 def resolve_model(local_path: str, hf_id: str) -> str:
@@ -153,7 +247,14 @@ CODEC_HZ = 12
 FADE_MS = 30
 
 
-def prepare_ref_audio(wav: np.ndarray, sr: int) -> np.ndarray:
+def prepare_ref_audio(wav: np.ndarray, sr: int, trailing_silence_s: float = REF_TRAILING_SILENCE_S) -> np.ndarray:
+    """Codec-frame-align + edge-fade (as before), THEN append trailing
+    silence so the ICL prefill's last tokens encode silence rather than
+    whatever phoneme the reference happened to end on. Order matters: the
+    fade-out is applied to the REAL reference audio's tail first (a gentle
+    30ms fade prevents an amplitude-discontinuity click at that join), and
+    only then is genuine digital silence appended after it — appending
+    silence before fading would fade the silence itself, which does nothing."""
     frame_samples = sr // CODEC_HZ
     n_frames = len(wav) // frame_samples
     trimmed = wav[: n_frames * frame_samples].copy()
@@ -161,7 +262,11 @@ def prepare_ref_audio(wav: np.ndarray, sr: int) -> np.ndarray:
     ramp = np.linspace(0.0, 1.0, fade_n, dtype=np.float32)
     trimmed[:fade_n] *= ramp
     trimmed[-fade_n:] *= ramp[::-1]
-    return trimmed.astype(np.float32)
+    trimmed = trimmed.astype(np.float32)
+    if trailing_silence_s > 0:
+        silence = np.zeros(int(sr * trailing_silence_s), dtype=np.float32)
+        trimmed = np.concatenate([trimmed, silence])
+    return trimmed
 
 
 def pad_audio(wav: np.ndarray, sr: int, pad_seconds: float = AUDIO_PAD_SECONDS) -> np.ndarray:
@@ -442,20 +547,58 @@ def load_base_model():
     return model
 
 
-def build_clone_prompt(model):
-    """ONE full-ICL prompt, built once, reused unchanged for every chunk in
-    both runs — see the earlier investigation's finding that production's
-    x_vector_only_mode=True is the weaker cloning mode; this script always
-    uses the proposed fix (x_vector_only_mode=False) so today's test
-    isolates ONLY the language-resolution variable, not cloning-mode drift
-    on top of it."""
+def build_clone_prompt(model, x_vector_only_mode: bool = False):
+    """ONE clone prompt, built once, reused unchanged for every chunk in a
+    run. x_vector_only_mode is now a parameter (was hardcoded False) to
+    support the accent-bleed A/B test below.
+
+    ACCENT BLEED — a SEPARATE, real tension from the leaked-fragment
+    artifact fixed above, surfaced by external research (Qwen3-TTS
+    community): full ICL mode (x_vector_only_mode=False) feeds the
+    reference clip's own codec tokens into the model's context, which
+    means the reference's LANGUAGE/ACCENT can color pronunciation of later
+    text in a DIFFERENT language — a documented, named failure mode
+    (QwenLM/Qwen3-TTS discussion #230, "Spanish spoken with unwanted
+    English accent" during cross-lingual ICL cloning). x_vector_only_mode
+    is explicitly the community's cited alternative for "no accent bleed
+    from the reference language" — at the cost of the weaker cloning
+    fidelity/emotion range already established. This is a genuine
+    three-way tradeoff for Celeste's specific EN/JP mixed-sentence use
+    case (fidelity vs. accent-cleanliness vs. speed/simplicity), not a
+    strictly-better-in-all-cases fix like the silence-append/longer-
+    reference changes above — hence testing BOTH modes directly on RUN B's
+    real mixed-script content (see RUN_C below) rather than picking one
+    from documentation alone."""
     if not os.path.exists(CELESTE_REF_WAV):
         raise FileNotFoundError(f"Celeste reference clip not found: {CELESTE_REF_WAV}")
     ref_wav, ref_sr = sf.read(CELESTE_REF_WAV)
     ref_wav = prepare_ref_audio(ref_wav.astype(np.float32), ref_sr)
+    if x_vector_only_mode:
+        # x-vector-only mode ignores ref_text entirely (per qwen_tts's own
+        # docstring: "ref_text/ref_code are ignored" when x_vector_only=True)
+        # — passing it anyway is harmless but omitted here for clarity.
+        return model.create_voice_clone_prompt(
+            ref_audio=(ref_wav, ref_sr), x_vector_only_mode=True,
+        )
     return model.create_voice_clone_prompt(
         ref_audio=(ref_wav, ref_sr), ref_text=CELESTE_REF_TEXT, x_vector_only_mode=False,
     )
+
+
+# Fixed seed reset before every chunk — external research finding (Qwen3
+# long-form TTS guidance): each chunk is generated independently, so
+# do_sample=True's random sampling is an additional, separate source of
+# timbre/pace drift ON TOP OF whatever the reference-prompt fix above
+# addresses. Resetting to the SAME seed before every chunk removes that
+# specific variance source — two chunks given the same prompt/text would
+# now sample identically, and in practice different text still gets
+# different sampling paths, but the STARTING random state no longer walks
+# further from the reference with every additional chunk generated. This
+# is complementary to, not a replacement for, the reference-quality fixes
+# above (seed control doesn't fix a bad/short reference; better reference
+# doesn't fix run-to-run sampling variance) — the two research threads
+# address genuinely different drift sources and both are cheap to apply.
+GENERATION_SEED = 42
 
 
 def run_variant(model, clone_prompt, run_name: str, scenario: list[tuple[str, str, str]]) -> dict:
@@ -472,6 +615,9 @@ def run_variant(model, clone_prompt, run_name: str, scenario: list[tuple[str, st
     for chunk_id, lang, text in scenario:
         max_tok = tokens_for_text(text)
         t0 = time.time()
+        torch.manual_seed(GENERATION_SEED)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(GENERATION_SEED)
         wavs, sr = model.generate_voice_clone(
             text=text,
             language=lang,
@@ -645,16 +791,49 @@ def print_final_report(results: list[dict]):
                   "jump as a real re-onset) and re-run, or report the specific chunk so the "
                   "thresholds can be tuned against real data instead of guessed.")
 
+    log.info("\n[5] ACCENT-BLEED A/B (ICL vs. x-vector-only on the SAME mixed-script content):")
+    icl_run = next((r for r in results if r["run_name"] == "run_b_mixed_script_icl"), None)
+    xvec_run = next((r for r in results if r["run_name"] == "run_c_mixed_script_xvec"), None)
+    if icl_run and xvec_run:
+        log.info(f"  run_b_mixed_script_icl   (x_vector_only_mode=False, full ICL):")
+        log.info(f"    {icl_run['merged_path']}")
+        log.info(f"  run_c_mixed_script_xvec  (x_vector_only_mode=True, embedding-only):")
+        log.info(f"    {xvec_run['merged_path']}")
+        log.info("  Listen to both, chunk-for-chunk (b00 vs c00, b01 vs c01, etc — same text, "
+                  "same reference clip, only the cloning mode differs):\n"
+                  "    - Does run_c's Japanese sound MORE natively pronounced than run_b's\n"
+                  "      (i.e. is accent bleed from Celeste's English reference actually\n"
+                  "      audible in run_b)? Community reports (QwenLM/Qwen3-TTS discussion\n"
+                  "      #230) say this is a real, documented risk in ICL mode specifically.\n"
+                  "    - Does run_c sound noticeably FLATTER/less expressive than run_b\n"
+                  "      (the fidelity cost x_vector_only_mode is known to carry)?\n"
+                  "    - If run_c's JP pronunciation is meaningfully cleaner AND the fidelity\n"
+                  "      loss is acceptable for this content, that's the case for keeping\n"
+                  "      production's CURRENT x_vector_only_mode=True default specifically for\n"
+                  "      mixed-language chunks — while still applying every OTHER fix in this\n"
+                  "      script (longer reference clip, silence-append, fixed seed) regardless\n"
+                  "      of which cloning mode is used, since those address separate problems.")
+    else:
+        log.info("  (one or both comparison runs missing — check run_name values in main())")
+
     log.info("\n" + "=" * 90)
 
 
 def main():
     model = load_base_model()
-    clone_prompt = build_clone_prompt(model)
+
+    icl_prompt = build_clone_prompt(model, x_vector_only_mode=False)
+    xvec_prompt = build_clone_prompt(model, x_vector_only_mode=True)
 
     results = []
-    results.append(run_variant(model, clone_prompt, "run_a_chunked_boundary", RUN_A_SCENARIO))
-    results.append(run_variant(model, clone_prompt, "run_b_mixed_script_single_sentence", RUN_B_SCENARIO))
+    results.append(run_variant(model, icl_prompt, "run_a_chunked_boundary", RUN_A_SCENARIO))
+    results.append(run_variant(model, icl_prompt, "run_b_mixed_script_icl", RUN_B_SCENARIO))
+    # RUN C — accent-bleed A/B: SAME mixed-script EN/JP content as Run B,
+    # SAME reference clip, only x_vector_only_mode flipped to True. Directly
+    # answers whether ICL mode's documented accent-bleed risk (community
+    # discussion #230) actually shows up on Celeste's Japanese portions, or
+    # whether the fidelity tradeoff is worth accepting for this content.
+    results.append(run_variant(model, xvec_prompt, "run_c_mixed_script_xvec", RUN_B_SCENARIO))
 
     print_final_report(results)
 
