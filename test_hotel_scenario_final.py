@@ -255,93 +255,121 @@ def tokens_for_text(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# THE SCENARIO — "Checking in: Japanese for the front desk"
+# THE SCENARIO — "Checking in: Japanese for the front desk"  (v2)
 #
-# Chunked at LANGUAGE BOUNDARIES (English narration chunks vs. Japanese-
-# phrase-teaching chunks kept as separate parts) rather than mixed mid-
-# sentence, per the mispronunciation workaround explained in the module
-# docstring. Each chunk carries its own "lang" — this is RUN A's value
-# (what audio_manager._resolve_tts_language would actually pick today: a
-# script-detection-driven single language per chunk). RUN B below re-runs
-# the SAME text with an explicit stronger language hint on the
-# Japanese-heavy chunks specifically, to isolate whether "auto" itself is
-# the weak point.
+# REWRITTEN per direct feedback on the v1 script: v1 used ROMAJI (Latin-
+# script transliteration, e.g. "konnichiwa") for the Japanese phrase whenever
+# it appeared inside an English explanatory sentence, and separately wrote
+# the SAME phrase in real Japanese script in its own standalone chunk. That
+# is exactly what produced "previous chunk says it correctly in Japanese,
+# next chunk re-reads the same phrase but now in English pronunciation" —
+# it wasn't a model inconsistency, it was two different chunks containing
+# two different SPELLINGS (real Japanese script vs. English-alphabet
+# transliteration) of the same phrase, and the model correctly read each
+# one as what it visually is. Romaji has zero non-Latin codepoints, so both
+# audio_manager._resolve_tts_language's script detector AND the model's own
+# text understanding have every reason to treat it as English text.
+#
+# FIX: romaji is no longer used ANYWHERE in this script. Every Japanese
+# phrase is written in real Japanese script (かな/漢字) every single time,
+# including when it's embedded inside an otherwise-English sentence — see
+# RUN B below, which answers the direct question "can one sentence contain
+# both English and real Japanese characters, correctly pronounced as each
+# language, in a single generate_voice_clone() call?" The answer per Qwen's
+# own architecture (confirmed via modeling_qwen3_tts.py: language="auto"
+# sets language_id=None, meaning no single language is forced on the whole
+# utterance — the model's tokenizer is Unicode-based and its "Intelligent
+# Text Understanding" reads per-token script/semantics) is: yes, this is
+# exactly what language="auto" exists for. RUN B tests that directly with
+# real single-sentence EN+JP mixes, not split across chunks.
+#
+# RUN A (chunked-at-boundary, matches v1's structure) is KEPT as a baseline
+# for comparison — same phrases, but now real Japanese script throughout,
+# still split into separate English-explanation / Japanese-phrase chunks.
+# RUN B (mixed-script single-sentence) is the NEW approach — the same
+# content, but English narration and the Japanese phrase share ONE sentence
+# and ONE generate_voice_clone() call, language="auto" throughout.
+#
+# Japanese sentences are also LONGER per direct request — full, natural
+# multi-clause sentences (not just a 2-4 word phrase) using です/ます polite
+# form, matching how a real hotel conversation actually sounds rather than
+# flashcard-style fragments.
 #
 # Paralinguistic color via punctuation/emoticon (no bracket tags — see
-# docstring point 3): warmth/encouragement via "!", a light self-correcting
-# beat via em-dash, mild comic exasperation via a text-emoticon on chunk 07,
-# matching the README's own demonstrated pattern.
+# module docstring point 3): warmth/encouragement via "!", a light self-
+# correcting beat via em-dash, a text-emoticon, matching the README's own
+# demonstrated pattern.
 # ---------------------------------------------------------------------------
-SCENARIO: list[tuple[str, str, str]] = [
-    # (chunk_id, resolve_as_lang_for_run_a, text)
-    ("chunk_00", "english",
+
+# RUN A — chunked at language boundaries. Japanese chunks use real script
+# only; the surrounding English chunks NAME the phrase in English translation
+# only (no transliteration at all — reading a phrase's pronunciation aloud in
+# Latin letters is exactly the mechanism that caused the original bug, so v2
+# doesn't reintroduce it even as "helper" text).
+RUN_A_SCENARIO: list[tuple[str, str, str]] = [
+    # (chunk_id, lang, text)
+    ("a00", "english",
      "Okay, we've just landed in Tokyo, and our first stop is the hotel front desk. "
      "Let's get you ready with a few essential phrases before we walk in."),
-    ("chunk_01", "japanese",
-     "こんにちは。予約しています。"),
-    ("chunk_02", "english",
-     "That means 'Hello, I have a reservation' — konnichiwa, yoyaku shite imasu. "
-     "Say it with me, nice and clear: konnichiwa, yoyaku shite imasu."),
-    ("chunk_03", "english",
-     "Now, the front desk clerk might ask for your passport. Here's how you'll hear it — "
-     "listen closely, because this next word trips a lot of learners up."),
-    ("chunk_04", "japanese",
-     "パスポートをお願いします。"),
-    ("chunk_05", "english",
-     "Pasupōto o onegaishimasu — 'Your passport, please.' Notice how 'passport' becomes "
-     "pasu-poh-toh in Japanese — it's a borrowed word, so the rhythm is completely different "
-     "from English. Don't rush it!"),
-    ("chunk_06", "english",
-     "Once you're checked in, you'll want to ask where the elevator is — trust me, you'll "
-     "need this one every single day of the trip."),
-    ("chunk_07", "japanese",
-     "エレベーターはどこですか？"),
-    ("chunk_08", "english",
-     "Erebētā wa doko desu ka? — 'Where is the elevator?' — and if they point and smile, "
-     "you'll know exactly what to say next: arigatou gozaimasu, thank you very much (^_^)."),
-    ("chunk_09", "english",
-     "One last one, for the morning after — you're going to want breakfast, and you're going "
-     "to want to know if it's included."),
-    ("chunk_10", "japanese",
-     "朝食は含まれていますか？"),
-    ("chunk_11", "english",
-     "Chōshoku wa fukumarete imasu ka? — 'Is breakfast included?' — such a useful little "
-     "sentence to have ready on day one."),
-    ("chunk_12", "english",
-     "And that's it — four real phrases you'll actually use within your first ten minutes "
-     "in Japan. Practice them once more before we move on, okay? You've got this!"),
+    ("a01", "japanese",
+     "こんにちは、予約をしております。名前は田中と申します。二泊三日でお願いしております。"),
+    ("a02", "english",
+     "That's a complete, natural check-in line — hello, I have a reservation, my name is "
+     "Tanaka, and it's for two nights and three days. Notice how much more is packed into "
+     "one polite sentence than you'd ever say in English at a front desk!"),
+    ("a03", "english",
+     "Now, the front desk clerk will very likely ask for your passport and explain the "
+     "hotel's breakfast hours in the same breath. Listen for how naturally it flows."),
+    ("a04", "japanese",
+     "パスポートを拝見してもよろしいでしょうか。朝食は一階のレストランで、七時から十時までとなっております。"),
+    ("a05", "english",
+     "May I see your passport, and breakfast is on the first floor restaurant, from seven "
+     "to ten in the morning — all one smooth, polite request. Don't rush it, and don't "
+     "worry about catching every word on the first listen!"),
+    ("a06", "english",
+     "Once you're checked in, you'll want to ask about the elevator, and maybe where you "
+     "can find a convenience store nearby — trust me, you'll need both within the hour."),
+    ("a07", "japanese",
+     "エレベーターはあちらにございます。コンビニでしたら、ホテルを出て左側に、歩いて二分ほどのところにございますよ。"),
+    ("a08", "english",
+     "The elevator is right over there, and if you're looking for a convenience store, it's "
+     "just to the left as you leave the hotel, about a two-minute walk — such a genuinely "
+     "helpful answer, and exactly the kind of sentence you'll hear constantly in Japan."),
+    ("a09", "english",
+     "And that's it — real, full sentences you'll actually hear within your first ten "
+     "minutes in Japan, not just flashcard phrases. Listen through it once more, okay? "
+     "You've got this!"),
 ]
 
-# RUN B: for the Japanese-script chunks specifically, force the model's
-# explicit "japanese" language value (same value RUN A already uses for
-# those rows in this particular scenario, since script-detection correctly
-# identifies them as Japanese either way) — the REAL A/B differs on chunks
-# that MIX English romaji explanation with an embedded Japanese phrase in
-# the same sentence (chunks 02, 05, 08, 11 above all do this: an English
-# sentence containing a romanized Japanese phrase). RUN A resolves those as
-# "auto" per audio_manager._resolve_tts_language's actual has_foreign check
-# (they contain real Japanese-script characters earlier in the scenario's
-# surrounding context, but individually these specific sentences are
-# Latin-script romaji + English — resolve_tts_language would call these
-# "english", not "auto", since it scans for non-Latin CODEPOINTS, and romaji
-# has none). That mismatch — a chunk that is PHONETICALLY Japanese content
-# but LEXICALLY all-Latin-script — is a real gap in the current language
-# resolver, independent of the model itself, and worth testing directly:
-RUN_B_OVERRIDES = {
-    "chunk_02": "auto",       # contains romaji "konnichiwa, yoyaku shite imasu" — force auto instead of the resolver's "english"
-    "chunk_05": "auto",       # contains romaji "pasupōto o onegaishimasu"
-    "chunk_08": "auto",       # contains romaji "erebētā wa doko desu ka"
-    "chunk_11": "auto",       # contains romaji "chōshoku wa fukumarete imasu ka"
-}
+# RUN B — the actual answer to "can one sentence mix English and real
+# Japanese characters, correctly pronounced as each language?" Each chunk is
+# a SINGLE sentence containing both English narration AND a genuine Japanese
+# clause in real script, generated in ONE generate_voice_clone() call with
+# language="auto" (never split, never transliterated).
+RUN_B_SCENARIO: list[tuple[str, str, str]] = [
+    ("b00", "auto",
+     "Okay, we've just landed in Tokyo — and the very first thing you'll hear at the front "
+     "desk is こんにちは、予約をしております, which simply means 'hello, I have a reservation.'"),
+    ("b01", "auto",
+     "If they ask to see your passport, you'll hear パスポートを拝見してもよろしいでしょうか — "
+     "and don't worry, they're just politely asking to take a look at it."),
+    ("b02", "auto",
+     "They might also mention 朝食は一階のレストランで、七時から十時までとなっております, which "
+     "tells you breakfast is served downstairs from seven until ten every morning."),
+    ("b03", "auto",
+     "Later, if you need directions, a simple wave and エレベーターはあちらにございます means "
+     "'the elevator is right over there' — short, polite, and easy to catch once you know it."),
+    ("b04", "auto",
+     "And if you're craving a snack, someone might say コンビニでしたら、歩いて二分ほどのところに"
+     "ございますよ — the convenience store is just about a two-minute walk away. Isn't it "
+     "wonderful how much warmth fits into one polite Japanese sentence?"),
+    ("b05", "auto",
+     "See how naturally that flowed — English explaining, then real Japanese right in the "
+     "middle of the same breath? That's genuinely how bilingual conversation feels, not "
+     "two separate languages bolted together!"),
+]
 
 
-def resolve_lang_run_a(declared_lang: str) -> str:
-    """Mirrors audio_manager._resolve_tts_language's actual behavior for
-    this script's purposes: Japanese-script chunks resolve to 'japanese'
-    directly (declared), English chunks with embedded romaji still resolve
-    to 'english' because the resolver only scans Unicode codepoints, not
-    phonetic content — it can't tell romaji from ordinary English text."""
-    return declared_lang
 
 
 def load_base_model():
@@ -386,7 +414,7 @@ def build_clone_prompt(model):
     )
 
 
-def run_variant(model, clone_prompt, run_name: str, lang_overrides: dict[str, str]) -> dict:
+def run_variant(model, clone_prompt, run_name: str, scenario: list[tuple[str, str, str]]) -> dict:
     """Generates all chunks, pads each exactly like production, merges with
     the SAME ffmpeg concat production uses, and returns full diagnostics."""
     run_dir = os.path.join(OUT_DIR, run_name)
@@ -397,8 +425,7 @@ def run_variant(model, clone_prompt, run_name: str, lang_overrides: dict[str, st
     raw_paths = []
     t_run = time.time()
 
-    for chunk_id, declared_lang, text in SCENARIO:
-        lang = lang_overrides.get(chunk_id, resolve_lang_run_a(declared_lang))
+    for chunk_id, lang, text in scenario:
         max_tok = tokens_for_text(text)
         t0 = time.time()
         wavs, sr = model.generate_voice_clone(
@@ -484,14 +511,21 @@ def print_final_report(results: list[dict]):
     for r in results:
         log.info(f"  {r['run_name']}:")
         for c in r["per_chunk"]:
-            if c["lang"] in ("japanese", "auto"):
-                log.info(f"    {c['chunk_id']}  lang={c['lang']:<10}  {c['text'][:70]!r}")
-    log.info("  Listen to each run's Japanese-content chunks side by side. If RUN B's "
-              "'auto'-forced romaji chunks (02/05/08/11) pronounce the embedded Japanese "
-              "phrase noticeably better than RUN A's 'english'-resolved versions of the "
-              "SAME text, that confirms the gap is in audio_manager._resolve_tts_language's "
-              "codepoint-only script detection — it should also flag ROMANIZED foreign-"
-              "language content, not just non-Latin script, as a candidate for 'auto'.")
+            log.info(f"    {c['chunk_id']}  lang={c['lang']:<10}  {c['text'][:70]!r}")
+    log.info("  RUN A (chunked-at-boundary): every Japanese phrase is real script "
+              "(かな/漢字) in its own standalone chunk, no romaji anywhere — this alone should "
+              "fix the 'previous chunk correct, next chunk reads it in English pronunciation' "
+              "symptom, since that was caused by romaji spelling being read as English text, "
+              "not by an actual model inconsistency.\n"
+              "  RUN B (mixed-script single-sentence): the real test of whether Qwen can "
+              "code-switch WITHIN one sentence — each chunk is one generate_voice_clone() call, "
+              "language='auto', containing both English narration and a real-script Japanese "
+              "clause in the same sentence. Listen for whether the Japanese portion is "
+              "pronounced as Japanese (not spelled out/anglicized) and whether the switch "
+              "in and out of it sounds like one continuous utterance rather than two stitched "
+              "clips. If RUN B sounds natural, that confirms language='auto' + real script is "
+              "the correct mechanism for single-sentence code-switching, and RUN A's chunk-"
+              "splitting approach is no longer necessary going forward.")
 
     log.info("\n[2] MERGE OVERLAP / TIMING CHECK:")
     for r in results:
@@ -572,10 +606,8 @@ def main():
     clone_prompt = build_clone_prompt(model)
 
     results = []
-    results.append(run_variant(model, clone_prompt, "run_a_auto",
-                                lang_overrides={}))  # pure resolve_lang_run_a behavior
-    results.append(run_variant(model, clone_prompt, "run_b_explicit_lang",
-                                lang_overrides=RUN_B_OVERRIDES))
+    results.append(run_variant(model, clone_prompt, "run_a_chunked_boundary", RUN_A_SCENARIO))
+    results.append(run_variant(model, clone_prompt, "run_b_mixed_script_single_sentence", RUN_B_SCENARIO))
 
     print_final_report(results)
 
