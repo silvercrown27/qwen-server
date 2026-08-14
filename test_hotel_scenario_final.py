@@ -194,22 +194,50 @@ def pad_audio(wav: np.ndarray, sr: int, pad_seconds: float = AUDIO_PAD_SECONDS) 
 # fraction of a 2-3s clip than a 10s+ one) — exactly matching the reported
 # symptom being isolated to the short Japanese-only lines.
 #
-# This trims any leading fragment-then-silence-gap pattern BEFORE the real
+# This trims any leading fragment-then-dip pattern BEFORE the real
 # utterance's sustained onset, independent of (in addition to, not instead
-# of) the library's own already-applied cut. It's conservative by design:
-# it only acts when it finds an actual RMS-defined silence gap very close
-# to the start of the clip, so a real utterance that legitimately begins
-# with a soft consonant (no true gap right after it) is left untouched.
+# of) the library's own already-applied cut.
+#
+# v2 CORRECTION: the original version of this detector required an
+# ABSOLUTE-silence gap (frame RMS below a fixed 0.003 floor) between the
+# leaked burst and the real onset. That worked for the specific chunk it was
+# built against, but a second real GPU run (RUN A's "a01" chunk — the same
+# こんにちは phrase, same voice, same fix already applied) still leaked an
+# audible fragment at the very front, and inspecting its waveform at 10ms
+# resolution explained why: the dip between the leaked burst (0-40ms, rms
+# ~0.03-0.04) and the real utterance's sustained onset (80ms+, rms ~0.10+)
+# only fell to ~0.008-0.011 — a real, measurable LOCAL MINIMUM, but well
+# above the old 0.003 absolute-silence floor, so the old detector correctly
+# found no "silence" and did nothing. The leak is real either way; only its
+# depth varies from call to call (different reference-clip token position
+# gets cut into depending on each chunk's own generated-token count), so an
+# absolute threshold could never reliably catch both a hard-silence leak and
+# a soft-dip leak with one fixed number.
+#
+# FIX: detect a RELATIVE dip instead of an absolute silence floor — a frame
+# whose RMS falls to LEAK_DIP_RATIO or less of the loudest frame seen so far
+# in the burst, that then recovers to above the burst's own peak (confirming
+# the recovery is a genuinely LOUDER new onset, not just noise wobbling
+# within the same utterance). This generalizes both the original hard-
+# silence case (ratio ~0) and the newly observed soft-dip case (ratio ~0.08-
+# 0.11 relative to the burst peak here) without needing a hand-tuned
+# absolute number that happens to fit whichever example was measured last.
 LEAK_SCAN_WINDOW_S = 0.30       # only look for the leak pattern within this leading window
-LEAK_FRAME_S = 0.02             # analysis frame size
-LEAK_SILENCE_RMS = 0.003        # frame RMS below this counts as "silence" for gap detection
-LEAK_MIN_GAP_S = 0.04           # minimum silent-frame run to count as a real gap (not just a dip)
+LEAK_FRAME_S = 0.01             # analysis frame size (10ms — fine enough to resolve a soft dip)
+LEAK_DIP_RATIO = 0.5            # dip frame RMS must fall to <= this fraction of the burst's peak RMS
+LEAK_MIN_GAP_S = 0.02           # minimum dip-frame run to count as a real gap (not just one noisy frame)
+LEAK_RECOVERY_RATIO = 1.15      # re-onset must exceed the burst's own peak RMS by this factor to count
+                                 # as a genuinely new (louder) event, not the same utterance continuing
 
 
 def strip_leading_reference_leak(wav: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
     """Returns (possibly-trimmed wav, seconds trimmed). No-op unless a clear
-    burst -> silence-gap -> re-onset pattern is found within the first
-    LEAK_SCAN_WINDOW_S of the clip."""
+    burst -> relative-dip -> louder-re-onset pattern is found within the
+    first LEAK_SCAN_WINDOW_S of the clip. Conservative by design: requires
+    BOTH a real dip AND a re-onset that's meaningfully louder than the
+    leading burst — a legitimate utterance that starts on a soft consonant
+    and ramps up smoothly (no real dip) or one that starts loud and stays
+    roughly level (no louder re-onset) is left untouched either way."""
     frame_n = int(sr * LEAK_FRAME_S)
     scan_frames = int(LEAK_SCAN_WINDOW_S / LEAK_FRAME_S)
     min_gap_frames = max(1, int(LEAK_MIN_GAP_S / LEAK_FRAME_S))
@@ -221,29 +249,45 @@ def strip_leading_reference_leak(wav: np.ndarray, sr: int) -> tuple[np.ndarray, 
             break
         frame_rms.append(float(np.sqrt(np.mean(seg.astype(np.float64) ** 2))))
 
-    # Find the first run of >= min_gap_frames consecutive silent frames that
-    # is preceded by at least one non-silent frame (a burst) and followed by
-    # a return to non-silent frames (the real onset) — i.e. burst, gap,
-    # re-onset, all within the scan window.
-    i = 0
+    if not frame_rms:
+        return wav, 0.0
+
+    # Track the burst's running peak as we scan forward; once we see a dip
+    # to <= LEAK_DIP_RATIO of that peak, look for a recovery to
+    # >= LEAK_RECOVERY_RATIO of that same peak — a genuinely louder new
+    # event, i.e. the real utterance starting, not just level noise.
+    #
+    # RECOVERY CHECK USES A LOOK-AHEAD WINDOW, NOT A SINGLE FRAME: real
+    # speech onsets ramp up over several frames rather than jumping straight
+    # to full volume in one 10ms step (confirmed against a01.wav — the frame
+    # immediately after its dip is still transitional at rms=0.033, only
+    # reaching its real sustained level of ~0.10-0.13 two frames later). A
+    # single-frame check right after the gap can catch that transitional
+    # frame and wrongly conclude "no real recovery" even though the actual
+    # utterance onset is one frame away. Looking at the PEAK over the next
+    # RECOVERY_LOOKAHEAD_FRAMES frames avoids that off-by-one-frame miss.
+    RECOVERY_LOOKAHEAD_FRAMES = 5   # ~50ms at LEAK_FRAME_S=0.01 — enough to span a ramping onset
+    burst_peak = frame_rms[0]
+    i = 1
     while i < len(frame_rms):
-        if frame_rms[i] > LEAK_SILENCE_RMS:
-            # found a leading burst — look for a silence run right after it
-            j = i + 1
-            while j < len(frame_rms) and frame_rms[j] > LEAK_SILENCE_RMS:
-                j += 1
-            gap_start = j
-            while j < len(frame_rms) and frame_rms[j] <= LEAK_SILENCE_RMS:
+        burst_peak = max(burst_peak, frame_rms[i])
+        if frame_rms[i] <= burst_peak * LEAK_DIP_RATIO:
+            # found a dip — measure its run length
+            gap_start = i
+            j = i
+            while j < len(frame_rms) and frame_rms[j] <= burst_peak * LEAK_DIP_RATIO:
                 j += 1
             gap_len = j - gap_start
-            if gap_len >= min_gap_frames and j < len(frame_rms):
-                # burst [i:gap_start), gap [gap_start:j) confirmed, and real
-                # content resumes at frame j — trim everything before it.
+            recovery_window = frame_rms[j:j + RECOVERY_LOOKAHEAD_FRAMES]
+            recovery_peak = max(recovery_window) if recovery_window else 0.0
+            if gap_len >= min_gap_frames and j < len(frame_rms) and recovery_peak >= burst_peak * LEAK_RECOVERY_RATIO:
                 cut_sample = j * frame_n
                 return wav[cut_sample:], cut_sample / sr
-            # burst wasn't followed by a real gap — not the leak pattern,
-            # stop scanning (treat frame i as the legitimate utterance start)
-            break
+            # dip wasn't deep/long enough, or didn't recover louder — keep
+            # scanning forward in case a clearer pattern appears later in
+            # the window (e.g. the burst_peak was set by early noise)
+            i = j if j > i else i + 1
+            continue
         i += 1
 
     return wav, 0.0
@@ -588,15 +632,18 @@ def print_final_report(results: list[dict]):
     if any_leak:
         log.info("  >>> This run's WAV files already have the leak removed (see "
                   "strip_leading_reference_leak — applied to every chunk before padding/"
-                  "merge). Compare a chunk_01.wav from an OLDER run (before this fix) against "
-                  "this run's chunk_01.wav to confirm the fragment is gone.")
+                  "merge, using a RELATIVE dip-then-louder-recovery detector, not an "
+                  "absolute silence floor — see that function's docstring for why). Compare "
+                  "against an OLDER run's WAV (before this fix) on the same chunk_id to "
+                  "confirm the fragment is gone.")
     else:
-        log.info("  >>> No leak detected THIS run by the heuristic (LEAK_SILENCE_RMS/"
-                  "LEAK_MIN_GAP_S thresholds in this script) — if you still hear a leading "
-                  "artifact after this fix, the leak's silence gap may be shorter/quieter "
-                  "than the heuristic's thresholds catch; tighten LEAK_SILENCE_RMS or "
-                  "LEAK_MIN_GAP_S and re-run, or report the specific chunk so the thresholds "
-                  "can be tuned against real data instead of guessed.")
+        log.info("  >>> No leak detected THIS run by the heuristic (LEAK_DIP_RATIO/"
+                  "LEAK_MIN_GAP_S/LEAK_RECOVERY_RATIO thresholds in this script) — if you "
+                  "still hear a leading artifact after this fix, the leak's dip/recovery "
+                  "shape may fall outside these thresholds; tighten LEAK_DIP_RATIO (allow a "
+                  "shallower dip to count) or lower LEAK_RECOVERY_RATIO (accept a smaller "
+                  "jump as a real re-onset) and re-run, or report the specific chunk so the "
+                  "thresholds can be tuned against real data instead of guessed.")
 
     log.info("\n" + "=" * 90)
 
